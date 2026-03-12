@@ -5,7 +5,7 @@ import json
 import os
 import time
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from typing import Dict, List
 
@@ -17,6 +17,19 @@ from fetch_kis_daily import get_access_token
 VTS_BASE_URL = "https://openapivts.koreainvestment.com:29443"
 DEFENSE_SYMBOLS = ["012450", "079550", "047810", "272210", "064350"]
 KST = ZoneInfo("Asia/Seoul")
+
+
+def seconds_until_next_open(now_kst: datetime) -> int:
+    target = now_kst.replace(hour=9, minute=0, second=0, microsecond=0)
+    if now_kst.weekday() < 5 and now_kst < target:
+        return max(1, int((target - now_kst).total_seconds()))
+
+    # Move to next weekday 09:00.
+    d = now_kst + timedelta(days=1)
+    while d.weekday() >= 5:
+        d += timedelta(days=1)
+    next_open = d.replace(hour=9, minute=0, second=0, microsecond=0)
+    return max(1, int((next_open - now_kst).total_seconds()))
 
 
 def load_dotenv(dotenv_path: str = ".env") -> None:
@@ -525,7 +538,8 @@ def main() -> None:
                     emit(f"[{datetime.now().strftime('%H:%M:%S')}] market closed (KST) -> exit", save=True)
                     break
                 emit(f"[{datetime.now().strftime('%H:%M:%S')}] market closed (KST) -> waiting", save=False)
-                time.sleep(max(30, args.interval_sec))
+                sleep_sec = min(900, seconds_until_next_open(now_kst))
+                time.sleep(sleep_sec)
                 continue
 
             cycle_summary: List[str] = []
