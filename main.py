@@ -358,6 +358,65 @@ def get_orderable_cash(
     raise RuntimeError("cannot parse orderable cash from balance response")
 
 
+def get_positions(
+    base_url: str,
+    token: str,
+    app_key: str,
+    app_secret: str,
+    cano: str,
+    acnt_prdt_cd: str,
+) -> Dict[str, Dict[str, float]]:
+    url = f"{base_url}/uapi/domestic-stock/v1/trading/inquire-balance"
+    headers = {
+        "authorization": f"Bearer {token}",
+        "appKey": app_key,
+        "appSecret": app_secret,
+        "tr_id": "VTTC8434R",
+        "custtype": "P",
+    }
+    params = {
+        "CANO": cano,
+        "ACNT_PRDT_CD": acnt_prdt_cd,
+        "AFHR_FLPR_YN": "N",
+        "OFL_YN": "",
+        "INQR_DVSN": "02",
+        "UNPR_DVSN": "01",
+        "FUND_STTL_ICLD_YN": "N",
+        "FNCG_AMT_AUTO_RDPT_YN": "N",
+        "PRCS_DVSN": "01",
+        "CTX_AREA_FK100": "",
+        "CTX_AREA_NK100": "",
+    }
+    r = requests.get(url, headers=headers, params=params, timeout=15)
+    r.raise_for_status()
+    data = r.json()
+    if data.get("rt_cd") != "0":
+        raise RuntimeError(f"position inquiry failed: {data.get('msg1', '')}")
+
+    output1 = data.get("output1", [])
+    rows = output1 if isinstance(output1, list) else []
+    positions: Dict[str, Dict[str, float]] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        symbol = str(row.get("pdno", "")).strip()
+        if not symbol:
+            continue
+        qty_raw = row.get("hldg_qty", row.get("hold_qty", "0"))
+        avg_raw = row.get("pchs_avg_pric", row.get("avg_prvs", row.get("pchs_avg", "0")))
+        try:
+            qty = int(float(str(qty_raw).replace(",", "")))
+        except ValueError:
+            qty = 0
+        try:
+            avg = float(str(avg_raw).replace(",", ""))
+        except ValueError:
+            avg = 0.0
+        if qty > 0:
+            positions[symbol] = {"qty": qty, "avg_price": avg}
+    return positions
+
+
 def main() -> None:
     load_dotenv()
     args = parse_args()
@@ -425,6 +484,30 @@ def main() -> None:
             last_known_cash = initial_cash
             predicted_cash = initial_cash
             emit(f"initial_orderable_cash={initial_cash:,.0f} KRW", save=True)
+            positions = get_positions(
+                base_url=args.base_url,
+                token=token,
+                app_key=args.app_key,
+                app_secret=args.app_secret,
+                cano=args.cano,
+                acnt_prdt_cd=args.acnt_prdt_cd,
+            )
+            synced = []
+            for s in symbols:
+                pos = positions.get(s)
+                if not pos:
+                    continue
+                qty = int(pos["qty"])
+                avg = float(pos["avg_price"])
+                has_position[s] = True
+                held_qty[s] = qty
+                entry_price[s] = avg
+                entry_total_cost[s] = qty * avg * (1.0 + args.fee_rate)
+                synced.append(f"{s}:{qty}@{avg:.0f}")
+            if synced:
+                emit("initial_positions=" + ",".join(synced), save=True)
+            else:
+                emit("initial_positions=NONE", save=True)
         except Exception as e:
             emit(f"initial_orderable_cash=ERROR ({str(e)[:200]})", save=True)
             raise RuntimeError("initial cash inquiry failed in live mode")
@@ -557,6 +640,12 @@ def main() -> None:
                         buy_cost = qty * last_px
                         buy_fee = buy_cost * args.fee_rate
                         total_buy = buy_cost + buy_fee
+                    if qty <= 0:
+                        cycle_summary.append(
+                            f"{symbol} px={last_px:.0f} score={m.get('score', 0):.2f} cd={cooldown_left[symbol]} qty=0"
+                        )
+                        time.sleep(max(0, args.throttle_ms) / 1000.0)
+                        continue
                     if args.dry_run:
                         emit(
                             f"[{ts}] >>> BUY <<< {symbol} bar={bar_ts or '-'} px={last_px:.0f} qty={qty} "
