@@ -43,6 +43,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--symbols", default=",".join(DEFENSE_SYMBOLS), help="comma-separated symbols")
     p.add_argument("--interval-sec", type=int, default=30, help="main loop interval in seconds")
     p.add_argument("--bar-minutes", type=int, choices=[1, 3, 5], default=1, help="signal timeframe")
+    p.add_argument("--after-close-action", choices=["wait", "exit"], default="wait", help="behavior after market close")
 
     # Signal parameters
     p.add_argument("--short", type=int, default=5, help="short SMA window")
@@ -440,6 +441,7 @@ def main() -> None:
     exit_streak: Dict[str, int] = {s: 0 for s in symbols}
     realized_pnl_krw: Dict[str, float] = {s: 0.0 for s in symbols}
     last_price: Dict[str, float] = {s: 0.0 for s in symbols}
+    last_processed_bar: Dict[str, str] = {s: "" for s in symbols}
     paper_cash = args.paper_cash
     last_known_cash: float | None = None
     predicted_cash: float | None = None
@@ -514,6 +516,18 @@ def main() -> None:
 
     while True:
         try:
+            now_kst = datetime.now(KST)
+            hhmm = now_kst.hour * 100 + now_kst.minute
+            is_weekday = now_kst.weekday() < 5
+            in_session = is_weekday and (900 <= hhmm <= 1530)
+            if not in_session:
+                if args.after_close_action == "exit":
+                    emit(f"[{datetime.now().strftime('%H:%M:%S')}] market closed (KST) -> exit", save=True)
+                    break
+                emit(f"[{datetime.now().strftime('%H:%M:%S')}] market closed (KST) -> waiting", save=False)
+                time.sleep(max(30, args.interval_sec))
+                continue
+
             cycle_summary: List[str] = []
             cycle_bar_hms = "--:--:--"
             for symbol in symbols:
@@ -556,6 +570,11 @@ def main() -> None:
                     if len(d) == 8 and len(t) == 6:
                         bar_ts = f"{d[:4]}-{d[4:6]}-{d[6:8]} {t[:2]}:{t[2:4]}:{t[4:6]}"
                         cycle_bar_hms = f"{t[:2]}:{t[2:4]}:{t[4:6]}"
+                if bar_ts and last_processed_bar[symbol] == bar_ts:
+                    time.sleep(max(0, args.throttle_ms) / 1000.0)
+                    continue
+                if bar_ts:
+                    last_processed_bar[symbol] = bar_ts
 
                 if cooldown_left[symbol] > 0:
                     cooldown_left[symbol] -= 1
