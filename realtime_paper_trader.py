@@ -64,6 +64,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--retry", type=int, default=3, help="quote retry count")
     p.add_argument("--throttle-ms", type=int, default=800, help="delay between symbols in milliseconds")
     p.add_argument("--dry-run", action="store_true", help="print only, no order requests")
+    p.add_argument("--log-file", default="data/realtime_events.txt", help="important event log path")
+    p.add_argument("--log-rotate-minutes", type=int, default=10, help="create a new log file every N minutes")
 
     # Credentials
     p.add_argument("--base-url", default=os.getenv("KIS_BASE_URL", VTS_BASE_URL))
@@ -378,15 +380,33 @@ def main() -> None:
     last_known_cash: float | None = None
     predicted_cash: float | None = None
     cash_fail_streak = 0
+    base_log_path = Path(args.log_file)
+    base_log_path.parent.mkdir(parents=True, exist_ok=True)
 
-    print("start realtime paper trader")
-    print(
+    def current_log_path(now: datetime) -> Path:
+        rotate = max(1, args.log_rotate_minutes)
+        bucket_minute = (now.minute // rotate) * rotate
+        bucket = now.replace(minute=bucket_minute, second=0, microsecond=0)
+        return base_log_path.with_name(
+            f"{base_log_path.stem}_{bucket.strftime('%Y%m%d_%H%M')}{base_log_path.suffix or '.txt'}"
+        )
+
+    def emit(message: str, *, save: bool = False) -> None:
+        print(message)
+        if save:
+            path = current_log_path(datetime.now())
+            with path.open("a", encoding="utf-8") as f:
+                f.write(message + "\n")
+
+    emit("start realtime paper trader", save=True)
+    emit(
         f"symbols={','.join(symbols)} dry_run={args.dry_run} bar={args.bar_minutes}m "
         f"model=multi_factor(short={args.short},long={args.long},mom={args.mom_window},"
-        f"stoch={args.stoch_window}/{args.stoch_smooth})"
+        f"stoch={args.stoch_window}/{args.stoch_smooth})",
+        save=True,
     )
     if args.dry_run:
-        print(f"paper_cash={paper_cash:,.0f} KRW")
+        emit(f"paper_cash={paper_cash:,.0f} KRW", save=True)
     else:
         try:
             initial_cash = get_orderable_cash(
@@ -399,9 +419,9 @@ def main() -> None:
             )
             last_known_cash = initial_cash
             predicted_cash = initial_cash
-            print(f"initial_orderable_cash={initial_cash:,.0f} KRW")
+            emit(f"initial_orderable_cash={initial_cash:,.0f} KRW", save=True)
         except Exception as e:
-            print(f"initial_orderable_cash=ERROR ({str(e)[:200]})")
+            emit(f"initial_orderable_cash=ERROR ({str(e)[:200]})", save=True)
             raise RuntimeError("initial cash inquiry failed in live mode")
 
     while True:
@@ -419,13 +439,13 @@ def main() -> None:
                         retry=args.retry,
                     )
                 except Exception as e:
-                    print(f"[{ts}] {symbol} fetch error: {str(e)[:180]}")
+                    emit(f"[{ts}] {symbol} fetch error: {str(e)[:180]}", save=True)
                     time.sleep(max(0, args.throttle_ms) / 1000.0)
                     continue
 
                 ohlc = resample_ohlc(bars, args.bar_minutes)
                 if not ohlc:
-                    print(f"[{ts}] {symbol} no data")
+                    emit(f"[{ts}] {symbol} no data")
                     continue
                 signal, m = multi_factor_signal(
                     ohlc=ohlc,
@@ -463,7 +483,7 @@ def main() -> None:
 
                 if signal == 1 and not has_position[symbol]:
                     if entry_streak[symbol] < args.entry_confirm_bars:
-                        print(
+                        emit(
                             f"[{ts}] {symbol} hold px={last_px:.0f} pos={has_position[symbol]} "
                             f"score={m.get('score', 0):.2f} entry_wait={entry_streak[symbol]}/{args.entry_confirm_bars}"
                         )
@@ -489,13 +509,14 @@ def main() -> None:
                             cash_fail_streak += 1
                             fallback_cash = predicted_cash if predicted_cash is not None else last_known_cash
                             if fallback_cash is None:
-                                print(f"[{ts}] {symbol} cash inquiry error: {str(e)[:180]} (no fallback)")
+                                emit(f"[{ts}] {symbol} cash inquiry error: {str(e)[:180]} (no fallback)", save=True)
                                 time.sleep(max(0, args.throttle_ms) / 1000.0)
                                 continue
                             orderable_cash = fallback_cash
-                            print(
+                            emit(
                                 f"[{ts}] {symbol} cash inquiry error -> using predicted cash "
-                                f"{orderable_cash:,.0f} KRW (fail_streak={cash_fail_streak})"
+                                f"{orderable_cash:,.0f} KRW (fail_streak={cash_fail_streak})",
+                                save=True,
                             )
                     usable_cash = max(0.0, orderable_cash * (1.0 - args.cash_buffer_pct))
                     qty = int(usable_cash // (last_px * (1.0 + args.fee_rate)))
@@ -508,11 +529,12 @@ def main() -> None:
                         buy_fee = buy_cost * args.fee_rate
                         total_buy = buy_cost + buy_fee
                     if args.dry_run:
-                        print(
+                        emit(
                             f"[{ts}] {symbol} BUY px={last_px:.0f} qty={qty} "
                             f"score={m.get('score', 0):.2f} mom={m.get('mom', 0)*100:.2f}% "
                             f"k={m.get('k', 0):.1f} d={m.get('d', 0):.1f} "
-                            f"cash={orderable_cash:.0f} usable={usable_cash:.0f} fee={buy_fee:,.0f} (dry-run)"
+                            f"cash={orderable_cash:.0f} usable={usable_cash:.0f} fee={buy_fee:,.0f} (dry-run)",
+                            save=True,
                         )
                     else:
                         res = place_order(
@@ -526,7 +548,7 @@ def main() -> None:
                             qty=qty,
                             side="buy",
                         )
-                        print(f"[{ts}] {symbol} BUY order -> {res.get('msg1', '')} / rt_cd={res.get('rt_cd')}")
+                        emit(f"[{ts}] {symbol} BUY order -> {res.get('msg1', '')} / rt_cd={res.get('rt_cd')}", save=True)
                     if qty > 0:
                         if args.dry_run:
                             paper_cash -= total_buy
@@ -546,20 +568,21 @@ def main() -> None:
                             for s in symbols
                             if has_position[s] and entry_price[s] > 0 and held_qty[s] > 0
                         )
-                        print(
+                        emit(
                             f"[{ts}] portfolio realized={total_realized:,.0f} KRW "
-                            f"unrealized={total_unrealized:,.0f} KRW"
+                            f"unrealized={total_unrealized:,.0f} KRW",
+                            save=True,
                         )
                 elif signal == -1 and has_position[symbol]:
                     if held_bars[symbol] < args.min_hold_bars:
-                        print(
+                        emit(
                             f"[{ts}] {symbol} hold px={last_px:.0f} pos={has_position[symbol]} "
                             f"score={m.get('score', 0):.2f} hold_lock={held_bars[symbol]}/{args.min_hold_bars}"
                         )
                         time.sleep(max(0, args.throttle_ms) / 1000.0)
                         continue
                     if exit_streak[symbol] < args.exit_confirm_bars:
-                        print(
+                        emit(
                             f"[{ts}] {symbol} hold px={last_px:.0f} pos={has_position[symbol]} "
                             f"score={m.get('score', 0):.2f} exit_wait={exit_streak[symbol]}/{args.exit_confirm_bars}"
                         )
@@ -573,10 +596,11 @@ def main() -> None:
                     trade_pnl_krw = sell_net - entry_total_cost[symbol]
                     pnl_pct = (trade_pnl_krw / entry_total_cost[symbol] * 100.0) if entry_total_cost[symbol] > 0 else 0.0
                     if args.dry_run:
-                        print(
+                        emit(
                             f"[{ts}] {symbol} SELL px={last_px:.0f} qty={qty} "
                             f"pnl={pnl_pct:.2f}% ({trade_pnl_krw:,.0f} KRW) "
-                            f"score={m.get('score', 0):.2f} fee={sell_fee:,.0f} (dry-run)"
+                            f"score={m.get('score', 0):.2f} fee={sell_fee:,.0f} (dry-run)",
+                            save=True,
                         )
                     else:
                         res = place_order(
@@ -590,7 +614,7 @@ def main() -> None:
                             qty=qty,
                             side="sell",
                         )
-                        print(f"[{ts}] {symbol} SELL order -> {res.get('msg1', '')} / rt_cd={res.get('rt_cd')}")
+                        emit(f"[{ts}] {symbol} SELL order -> {res.get('msg1', '')} / rt_cd={res.get('rt_cd')}", save=True)
                     if args.dry_run:
                         paper_cash += sell_net
                     else:
@@ -611,22 +635,23 @@ def main() -> None:
                         for s in symbols
                         if has_position[s] and entry_price[s] > 0 and held_qty[s] > 0
                     )
-                    print(
+                    emit(
                         f"[{ts}] portfolio realized={total_realized:,.0f} KRW "
-                        f"unrealized={total_unrealized:,.0f} KRW"
+                        f"unrealized={total_unrealized:,.0f} KRW",
+                        save=True,
                     )
                 else:
-                    print(
+                    emit(
                         f"[{ts}] {symbol} hold px={last_px:.0f} pos={has_position[symbol]} "
                         f"score={m.get('score', 0):.2f} cd={cooldown_left[symbol]}"
                     )
 
                 time.sleep(max(0, args.throttle_ms) / 1000.0)
         except KeyboardInterrupt:
-            print("stopped by user")
+            emit("stopped by user", save=True)
             break
         except Exception as e:
-            print(f"[ERR] {e}")
+            emit(f"[ERR] {e}", save=True)
             if "Unauthorized" in str(e) or "access token" in str(e).lower():
                 token = get_access_token(args.app_key, args.app_secret, base_url=args.base_url)
             time.sleep(max(2, args.interval_sec))
