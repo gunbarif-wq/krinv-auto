@@ -26,12 +26,12 @@ KIS_BASE_URL=https://openapivts.koreainvestment.com:29443
 
 ## 3) Dry-run
 ```bash
-python realtime_paper_trader.py --dry-run --log-file data/realtime_events.txt --log-rotate-minutes 10
+python main.py --dry-run --log-file data/realtime_events.txt --log-rotate-minutes 10
 ```
 
 ## 4) Dry-run with anti-churn options
 ```bash
-python realtime_paper_trader.py --dry-run \
+python main.py --dry-run \
   --entry-confirm-bars 3 --exit-confirm-bars 3 --min-hold-bars 5 \
   --entry-threshold 0.35 --exit-threshold -0.20 --cooldown-bars 5 \
   --position-size-pct 0.15 --min-order-krw 200000 \
@@ -40,7 +40,7 @@ python realtime_paper_trader.py --dry-run \
 
 ## 5) Live trading
 ```bash
-python realtime_paper_trader.py --log-file data/realtime_events.txt --log-rotate-minutes 10
+python main.py --log-file data/realtime_events.txt --log-rotate-minutes 10
 ```
 
 ## 6) Fetch last week 1m bars

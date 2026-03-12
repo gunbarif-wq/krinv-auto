@@ -7,7 +7,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Tuple
 
-from realtime_paper_trader import multi_factor_signal
+from main import multi_factor_signal
 
 
 @dataclass
@@ -28,22 +28,22 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--cash", type=float, default=10_000_000)
     p.add_argument("--fee-rate", type=float, default=0.0005)
     p.add_argument("--cash-buffer-pct", type=float, default=0.15)
-    p.add_argument("--position-size-pct", type=float, default=0.20)
-    p.add_argument("--min-order-krw", type=float, default=100_000)
+    p.add_argument("--position-size-pct", type=float, default=0.08)
+    p.add_argument("--min-order-krw", type=float, default=200_000)
 
     p.add_argument("--short", type=int, default=5)
     p.add_argument("--long", type=int, default=20)
     p.add_argument("--mom-window", type=int, default=12)
     p.add_argument("--stoch-window", type=int, default=14)
     p.add_argument("--stoch-smooth", type=int, default=3)
-    p.add_argument("--entry-threshold", type=float, default=0.35)
-    p.add_argument("--exit-threshold", type=float, default=-0.20)
-    p.add_argument("--entry-confirm-bars", type=int, default=3)
-    p.add_argument("--exit-confirm-bars", type=int, default=3)
-    p.add_argument("--min-hold-bars", type=int, default=5)
-    p.add_argument("--cooldown-bars", type=int, default=5)
+    p.add_argument("--entry-threshold", type=float, default=0.45)
+    p.add_argument("--exit-threshold", type=float, default=-0.25)
+    p.add_argument("--entry-confirm-bars", type=int, default=5)
+    p.add_argument("--exit-confirm-bars", type=int, default=4)
+    p.add_argument("--min-hold-bars", type=int, default=8)
+    p.add_argument("--cooldown-bars", type=int, default=8)
     p.add_argument("--stop-loss-pct", type=float, default=0.012)
-    p.add_argument("--take-profit-pct", type=float, default=0.020)
+    p.add_argument("--take-profit-pct", type=float, default=0.025)
     return p.parse_args()
 
 
