@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 import time
+from pathlib import Path
 from datetime import datetime
 from typing import Dict, List
 
@@ -14,6 +15,25 @@ from fetch_kis_daily import get_access_token
 
 VTS_BASE_URL = "https://openapivts.koreainvestment.com:29443"
 DEFENSE_SYMBOLS = ["012450", "079550", "047810", "272210", "064350"]
+
+
+def load_dotenv(dotenv_path: str = ".env") -> None:
+    path = Path(dotenv_path)
+    if not path.exists():
+        return
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[len("export ") :].strip()
+        if "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip().strip("'\"")
+        if key and key not in os.environ:
+            os.environ[key] = value
 
 
 def parse_args() -> argparse.Namespace:
@@ -327,6 +347,7 @@ def get_orderable_cash(
 
 
 def main() -> None:
+    load_dotenv()
     args = parse_args()
     if not args.app_key or not args.app_secret:
         raise RuntimeError("KIS_APP_KEY / KIS_APP_SECRET required")
