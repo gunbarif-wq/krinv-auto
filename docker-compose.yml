@@ -1,0 +1,24 @@
+services:
+  trader:
+    build: .
+    container_name: kis-paper-trader
+    restart: unless-stopped
+    environment:
+      KIS_BASE_URL: "https://openapivts.koreainvestment.com:29443"
+      KIS_APP_KEY: "${KIS_APP_KEY}"
+      KIS_APP_SECRET: "${KIS_APP_SECRET}"
+      KIS_CANO: "${KIS_CANO}"
+      KIS_ACNT_PRDT_CD: "${KIS_ACNT_PRDT_CD:-01}"
+    command:
+      [
+        "python",
+        "realtime_paper_trader.py",
+        "--bar-minutes", "5",
+        "--short", "5",
+        "--long", "20",
+        "--buy-cash", "1000000",
+        "--interval-sec", "30",
+        "--retry", "3",
+        "--throttle-ms", "800",
+        "--dry-run"
+      ]
