@@ -26,10 +26,26 @@ OCI Code Editor 기준:
 
 1. 우측 상단 `Code Editor` 열기
 2. 터미널 열기 (`Ctrl + \``)
-3. 아래 명령 실행
+3. GitHub SSH 키 생성/등록
+4. SSH로 프로젝트 클론 및 설치
 
+### 2-1) GitHub SSH 키 생성/등록
+1. 키 생성
 ```bash
-git clone https://github.com/osutaiko/krinv-auto
+ssh-keygen -t ed25519 -C "your_email@example.com"
+```
+2. 공개키 확인
+```bash
+cat ~/.ssh/id_ed25519.pub
+```
+3. 출력된 키를 복사해서 GitHub에 등록
+   - GitHub 우측 상단 프로필 -> `Settings`
+   - 좌측 `SSH and GPG keys`
+   - `New SSH key` -> Key 내용 붙여넣기 -> 저장
+
+### 2-2) SSH로 클론
+```bash
+git clone git@github.com:osutaiko/krinv-auto.git
 cd krinv-auto
 pip install -r requirements.txt
 ```
