@@ -342,6 +342,8 @@ def main() -> None:
     held_qty: Dict[str, int] = {s: 0 for s in symbols}
     entry_price: Dict[str, float] = {s: 0.0 for s in symbols}
     cooldown_left: Dict[str, int] = {s: 0 for s in symbols}
+    realized_pnl_krw: Dict[str, float] = {s: 0.0 for s in symbols}
+    last_price: Dict[str, float] = {s: 0.0 for s in symbols}
 
     print("start realtime paper trader")
     print(
@@ -396,6 +398,7 @@ def main() -> None:
                     exit_threshold=args.exit_threshold,
                 )
                 last_px = ohlc[-1]["close"]
+                last_price[symbol] = last_px
 
                 if cooldown_left[symbol] > 0:
                     cooldown_left[symbol] -= 1
@@ -447,13 +450,25 @@ def main() -> None:
                         has_position[symbol] = True
                         held_qty[symbol] = qty
                         entry_price[symbol] = last_px
+                        total_realized = sum(realized_pnl_krw.values())
+                        total_unrealized = sum(
+                            (last_price[s] - entry_price[s]) * held_qty[s]
+                            for s in symbols
+                            if has_position[s] and entry_price[s] > 0 and held_qty[s] > 0
+                        )
+                        print(
+                            f"[{ts}] portfolio realized={total_realized:,.0f} KRW "
+                            f"unrealized={total_unrealized:,.0f} KRW"
+                        )
                 elif signal == -1 and has_position[symbol]:
                     qty = held_qty[symbol]
                     pnl_pct = (last_px / entry_price[symbol] - 1.0) * 100 if entry_price[symbol] > 0 else 0.0
+                    trade_pnl_krw = (last_px - entry_price[symbol]) * qty
                     if args.dry_run:
                         print(
                             f"[{ts}] {symbol} SELL px={last_px:.0f} qty={qty} "
-                            f"pnl={pnl_pct:.2f}% score={m.get('score', 0):.2f} (dry-run)"
+                            f"pnl={pnl_pct:.2f}% ({trade_pnl_krw:,.0f} KRW) "
+                            f"score={m.get('score', 0):.2f} (dry-run)"
                         )
                     else:
                         res = place_order(
@@ -468,10 +483,21 @@ def main() -> None:
                             side="sell",
                         )
                         print(f"[{ts}] {symbol} SELL order -> {res.get('msg1', '')} / rt_cd={res.get('rt_cd')}")
+                    realized_pnl_krw[symbol] += trade_pnl_krw
                     has_position[symbol] = False
                     held_qty[symbol] = 0
                     entry_price[symbol] = 0.0
                     cooldown_left[symbol] = args.cooldown_bars
+                    total_realized = sum(realized_pnl_krw.values())
+                    total_unrealized = sum(
+                        (last_price[s] - entry_price[s]) * held_qty[s]
+                        for s in symbols
+                        if has_position[s] and entry_price[s] > 0 and held_qty[s] > 0
+                    )
+                    print(
+                        f"[{ts}] portfolio realized={total_realized:,.0f} KRW "
+                        f"unrealized={total_unrealized:,.0f} KRW"
+                    )
                 else:
                     print(
                         f"[{ts}] {symbol} hold px={last_px:.0f} pos={has_position[symbol]} "
