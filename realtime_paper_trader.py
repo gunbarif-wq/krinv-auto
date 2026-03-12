@@ -61,6 +61,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--min-hold-bars", type=int, default=3, help="minimum bars to hold before normal exit")
     p.add_argument("--fee-rate", type=float, default=0.0005, help="fee rate for sizing/pnl")
     p.add_argument("--paper-cash", type=float, default=10_000_000, help="fallback paper cash when balance inquiry fails")
+    p.add_argument("--position-size-pct", type=float, default=0.20, help="max position size as fraction of portfolio equity")
+    p.add_argument("--min-order-krw", type=float, default=100_000, help="skip buy when target order value is below this amount")
     p.add_argument("--retry", type=int, default=3, help="quote retry count")
     p.add_argument("--throttle-ms", type=int, default=800, help="delay between symbols in milliseconds")
     p.add_argument("--dry-run", action="store_true", help="print only, no order requests")
@@ -518,8 +520,24 @@ def main() -> None:
                                 f"{orderable_cash:,.0f} KRW (fail_streak={cash_fail_streak})",
                                 save=True,
                             )
-                    usable_cash = max(0.0, orderable_cash * (1.0 - args.cash_buffer_pct))
-                    qty = int(usable_cash // (last_px * (1.0 + args.fee_rate)))
+                    mtm_positions = sum(
+                        held_qty[s] * (last_price[s] if last_price[s] > 0 else entry_price[s])
+                        for s in symbols
+                        if has_position[s] and held_qty[s] > 0
+                    )
+                    portfolio_equity_est = orderable_cash + mtm_positions
+                    capped_by_equity = max(0.0, portfolio_equity_est * args.position_size_pct)
+                    capped_by_cash = max(0.0, orderable_cash * (1.0 - args.cash_buffer_pct))
+                    order_budget = min(capped_by_equity, capped_by_cash)
+                    if order_budget < args.min_order_krw:
+                        emit(
+                            f"[{ts}] {symbol} hold px={last_px:.0f} pos={has_position[symbol]} "
+                            f"score={m.get('score', 0):.2f} budget={order_budget:.0f}<min_order_krw"
+                        )
+                        time.sleep(max(0, args.throttle_ms) / 1000.0)
+                        continue
+
+                    qty = int(order_budget // (last_px * (1.0 + args.fee_rate)))
                     buy_cost = qty * last_px
                     buy_fee = buy_cost * args.fee_rate
                     total_buy = buy_cost + buy_fee
@@ -533,7 +551,7 @@ def main() -> None:
                             f"[{ts}] {symbol} BUY px={last_px:.0f} qty={qty} "
                             f"score={m.get('score', 0):.2f} mom={m.get('mom', 0)*100:.2f}% "
                             f"k={m.get('k', 0):.1f} d={m.get('d', 0):.1f} "
-                            f"cash={orderable_cash:.0f} usable={usable_cash:.0f} fee={buy_fee:,.0f} (dry-run)",
+                            f"cash={orderable_cash:.0f} budget={order_budget:.0f} fee={buy_fee:,.0f} (dry-run)",
                             save=True,
                         )
                     else:
