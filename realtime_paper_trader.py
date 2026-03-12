@@ -32,7 +32,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--exit-threshold", type=float, default=-0.10, help="sell score threshold")
 
     # Risk and execution
-    p.add_argument("--buy-cash", type=int, default=1_000_000, help="buy notional KRW per entry")
+    p.add_argument("--cash-buffer-pct", type=float, default=0.15, help="keep this cash ratio unused")
     p.add_argument("--stop-loss-pct", type=float, default=0.012, help="stop-loss ratio")
     p.add_argument("--take-profit-pct", type=float, default=0.020, help="take-profit ratio")
     p.add_argument("--cooldown-bars", type=int, default=3, help="bars to wait after exit")
@@ -266,6 +266,66 @@ def place_order(
     return r.json()
 
 
+def get_orderable_cash(
+    base_url: str,
+    token: str,
+    app_key: str,
+    app_secret: str,
+    cano: str,
+    acnt_prdt_cd: str,
+) -> float:
+    # VTS cash balance inquiry. Field names can vary by account type, so parse defensively.
+    url = f"{base_url}/uapi/domestic-stock/v1/trading/inquire-balance"
+    headers = {
+        "authorization": f"Bearer {token}",
+        "appKey": app_key,
+        "appSecret": app_secret,
+        "tr_id": "VTTC8434R",
+        "custtype": "P",
+    }
+    params = {
+        "CANO": cano,
+        "ACNT_PRDT_CD": acnt_prdt_cd,
+        "AFHR_FLPR_YN": "N",
+        "OFL_YN": "",
+        "INQR_DVSN": "02",
+        "UNPR_DVSN": "01",
+        "FUND_STTL_ICLD_YN": "N",
+        "FNCG_AMT_AUTO_RDPT_YN": "N",
+        "PRCS_DVSN": "01",
+        "CTX_AREA_FK100": "",
+        "CTX_AREA_NK100": "",
+    }
+    r = requests.get(url, headers=headers, params=params, timeout=15)
+    r.raise_for_status()
+    data = r.json()
+    if data.get("rt_cd") != "0":
+        raise RuntimeError(f"balance inquiry failed: {data.get('msg1', '')}")
+    out2 = data.get("output2", {})
+    candidates: List[Dict] = []
+    if isinstance(out2, dict):
+        candidates = [out2]
+    elif isinstance(out2, list):
+        candidates = [x for x in out2 if isinstance(x, dict)]
+
+    # Some responses keep cash fields in output1 as well.
+    out1 = data.get("output1", {})
+    if isinstance(out1, dict):
+        candidates.append(out1)
+    elif isinstance(out1, list):
+        candidates.extend([x for x in out1 if isinstance(x, dict)])
+
+    for obj in candidates:
+        for key in ("ord_psbl_cash", "dnca_tot_amt", "prvs_rcdl_excc_amt", "tot_evlu_amt"):
+            v = obj.get(key)
+            if v is not None and str(v).strip() != "":
+                try:
+                    return float(str(v).replace(",", ""))
+                except ValueError:
+                    pass
+    raise RuntimeError("cannot parse orderable cash from balance response")
+
+
 def main() -> None:
     args = parse_args()
     if not args.app_key or not args.app_secret:
@@ -289,6 +349,18 @@ def main() -> None:
         f"model=multi_factor(short={args.short},long={args.long},mom={args.mom_window},"
         f"stoch={args.stoch_window}/{args.stoch_smooth})"
     )
+    try:
+        initial_cash = get_orderable_cash(
+            base_url=args.base_url,
+            token=token,
+            app_key=args.app_key,
+            app_secret=args.app_secret,
+            cano=args.cano,
+            acnt_prdt_cd=args.acnt_prdt_cd,
+        )
+        print(f"initial_orderable_cash={initial_cash:,.0f} KRW")
+    except Exception as e:
+        print(f"initial_orderable_cash=ERROR ({str(e)[:200]})")
 
     while True:
         try:
@@ -336,12 +408,27 @@ def main() -> None:
                         signal = -1
 
                 if signal == 1 and not has_position[symbol]:
-                    qty = int(args.buy_cash // (last_px * 1.0005))
+                    try:
+                        orderable_cash = get_orderable_cash(
+                            base_url=args.base_url,
+                            token=token,
+                            app_key=args.app_key,
+                            app_secret=args.app_secret,
+                            cano=args.cano,
+                            acnt_prdt_cd=args.acnt_prdt_cd,
+                        )
+                    except Exception as e:
+                        print(f"[{ts}] {symbol} cash inquiry error: {str(e)[:180]}")
+                        time.sleep(max(0, args.throttle_ms) / 1000.0)
+                        continue
+                    usable_cash = max(0.0, orderable_cash * (1.0 - args.cash_buffer_pct))
+                    qty = int(usable_cash // (last_px * 1.0005))
                     if args.dry_run:
                         print(
                             f"[{ts}] {symbol} BUY px={last_px:.0f} qty={qty} "
                             f"score={m.get('score', 0):.2f} mom={m.get('mom', 0)*100:.2f}% "
-                            f"k={m.get('k', 0):.1f} d={m.get('d', 0):.1f} (dry-run)"
+                            f"k={m.get('k', 0):.1f} d={m.get('d', 0):.1f} "
+                            f"cash={orderable_cash:.0f} usable={usable_cash:.0f} (dry-run)"
                         )
                     else:
                         res = place_order(
