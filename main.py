@@ -428,8 +428,10 @@ def main() -> None:
 
     while True:
         try:
+            cycle_summary: List[str] = []
+            cycle_bar_hms = "--:--:--"
             for symbol in symbols:
-                ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                ts = datetime.now().strftime("%H:%M:%S")
                 try:
                     bars = get_minute_bars(
                         base_url=args.base_url,
@@ -461,6 +463,13 @@ def main() -> None:
                 )
                 last_px = ohlc[-1]["close"]
                 last_price[symbol] = last_px
+                bar_ts = ""
+                if bars:
+                    d = bars[-1].get("stck_bsop_date", "")
+                    t = bars[-1].get("stck_cntg_hour", "")
+                    if len(d) == 8 and len(t) == 6:
+                        bar_ts = f"{d[:4]}-{d[4:6]}-{d[6:8]} {t[:2]}:{t[2:4]}:{t[4:6]}"
+                        cycle_bar_hms = f"{t[:2]}:{t[2:4]}:{t[4:6]}"
 
                 if cooldown_left[symbol] > 0:
                     cooldown_left[symbol] -= 1
@@ -485,9 +494,9 @@ def main() -> None:
 
                 if signal == 1 and not has_position[symbol]:
                     if entry_streak[symbol] < args.entry_confirm_bars:
-                        emit(
-                            f"[{ts}] {symbol} hold px={last_px:.0f} pos={has_position[symbol]} "
-                            f"score={m.get('score', 0):.2f} entry_wait={entry_streak[symbol]}/{args.entry_confirm_bars}"
+                        cycle_summary.append(
+                            f"{symbol} px={last_px:.0f} score={m.get('score', 0):.2f} "
+                            f"cd={cooldown_left[symbol]} e={entry_streak[symbol]}/{args.entry_confirm_bars}"
                         )
                         time.sleep(max(0, args.throttle_ms) / 1000.0)
                         continue
@@ -530,9 +539,8 @@ def main() -> None:
                     capped_by_cash = max(0.0, orderable_cash * (1.0 - args.cash_buffer_pct))
                     order_budget = min(capped_by_equity, capped_by_cash)
                     if order_budget < args.min_order_krw:
-                        emit(
-                            f"[{ts}] {symbol} hold px={last_px:.0f} pos={has_position[symbol]} "
-                            f"score={m.get('score', 0):.2f} budget={order_budget:.0f}<min_order_krw"
+                        cycle_summary.append(
+                            f"{symbol} px={last_px:.0f} score={m.get('score', 0):.2f} cd={cooldown_left[symbol]}"
                         )
                         time.sleep(max(0, args.throttle_ms) / 1000.0)
                         continue
@@ -548,7 +556,7 @@ def main() -> None:
                         total_buy = buy_cost + buy_fee
                     if args.dry_run:
                         emit(
-                            f"[{ts}] {symbol} BUY px={last_px:.0f} qty={qty} "
+                            f"[{ts}] >>> BUY <<< {symbol} bar={bar_ts or '-'} px={last_px:.0f} qty={qty} "
                             f"score={m.get('score', 0):.2f} mom={m.get('mom', 0)*100:.2f}% "
                             f"k={m.get('k', 0):.1f} d={m.get('d', 0):.1f} "
                             f"cash={orderable_cash:.0f} budget={order_budget:.0f} fee={buy_fee:,.0f} (dry-run)",
@@ -566,7 +574,11 @@ def main() -> None:
                             qty=qty,
                             side="buy",
                         )
-                        emit(f"[{ts}] {symbol} BUY order -> {res.get('msg1', '')} / rt_cd={res.get('rt_cd')}", save=True)
+                        emit(
+                            f"[{ts}] >>> BUY <<< {symbol} bar={bar_ts or '-'} order -> "
+                            f"{res.get('msg1', '')} / rt_cd={res.get('rt_cd')}",
+                            save=True,
+                        )
                     if qty > 0:
                         if args.dry_run:
                             paper_cash -= total_buy
@@ -593,16 +605,16 @@ def main() -> None:
                         )
                 elif signal == -1 and has_position[symbol]:
                     if held_bars[symbol] < args.min_hold_bars:
-                        emit(
-                            f"[{ts}] {symbol} hold px={last_px:.0f} pos={has_position[symbol]} "
-                            f"score={m.get('score', 0):.2f} hold_lock={held_bars[symbol]}/{args.min_hold_bars}"
+                        cycle_summary.append(
+                            f"{symbol} px={last_px:.0f} score={m.get('score', 0):.2f} "
+                            f"cd={cooldown_left[symbol]} h={held_bars[symbol]}/{args.min_hold_bars}"
                         )
                         time.sleep(max(0, args.throttle_ms) / 1000.0)
                         continue
                     if exit_streak[symbol] < args.exit_confirm_bars:
-                        emit(
-                            f"[{ts}] {symbol} hold px={last_px:.0f} pos={has_position[symbol]} "
-                            f"score={m.get('score', 0):.2f} exit_wait={exit_streak[symbol]}/{args.exit_confirm_bars}"
+                        cycle_summary.append(
+                            f"{symbol} px={last_px:.0f} score={m.get('score', 0):.2f} "
+                            f"cd={cooldown_left[symbol]} x={exit_streak[symbol]}/{args.exit_confirm_bars}"
                         )
                         time.sleep(max(0, args.throttle_ms) / 1000.0)
                         continue
@@ -615,7 +627,7 @@ def main() -> None:
                     pnl_pct = (trade_pnl_krw / entry_total_cost[symbol] * 100.0) if entry_total_cost[symbol] > 0 else 0.0
                     if args.dry_run:
                         emit(
-                            f"[{ts}] {symbol} SELL px={last_px:.0f} qty={qty} "
+                            f"[{ts}] <<< SELL >>> {symbol} bar={bar_ts or '-'} px={last_px:.0f} qty={qty} "
                             f"pnl={pnl_pct:.2f}% ({trade_pnl_krw:,.0f} KRW) "
                             f"score={m.get('score', 0):.2f} fee={sell_fee:,.0f} (dry-run)",
                             save=True,
@@ -632,7 +644,11 @@ def main() -> None:
                             qty=qty,
                             side="sell",
                         )
-                        emit(f"[{ts}] {symbol} SELL order -> {res.get('msg1', '')} / rt_cd={res.get('rt_cd')}", save=True)
+                        emit(
+                            f"[{ts}] <<< SELL >>> {symbol} bar={bar_ts or '-'} order -> "
+                            f"{res.get('msg1', '')} / rt_cd={res.get('rt_cd')}",
+                            save=True,
+                        )
                     if args.dry_run:
                         paper_cash += sell_net
                     else:
@@ -659,12 +675,11 @@ def main() -> None:
                         save=True,
                     )
                 else:
-                    emit(
-                        f"[{ts}] {symbol} hold px={last_px:.0f} pos={has_position[symbol]} "
-                        f"score={m.get('score', 0):.2f} cd={cooldown_left[symbol]}"
-                    )
+                    cycle_summary.append(f"{symbol} px={last_px:.0f} score={m.get('score', 0):.2f} cd={cooldown_left[symbol]}")
 
                 time.sleep(max(0, args.throttle_ms) / 1000.0)
+            if cycle_summary:
+                emit(f"[{datetime.now().strftime('%H:%M:%S')}] {cycle_bar_hms} | " + " | ".join(cycle_summary))
         except KeyboardInterrupt:
             emit("stopped by user", save=True)
             break
