@@ -6,6 +6,7 @@ import os
 import time
 from pathlib import Path
 from datetime import datetime
+from zoneinfo import ZoneInfo
 from typing import Dict, List
 
 import requests
@@ -15,6 +16,7 @@ from fetch_kis_daily import get_access_token
 
 VTS_BASE_URL = "https://openapivts.koreainvestment.com:29443"
 DEFENSE_SYMBOLS = ["012450", "079550", "047810", "272210", "064350"]
+KST = ZoneInfo("Asia/Seoul")
 
 
 def load_dotenv(dotenv_path: str = ".env") -> None:
@@ -48,15 +50,15 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--mom-window", type=int, default=12, help="momentum window")
     p.add_argument("--stoch-window", type=int, default=14, help="stochastic K window")
     p.add_argument("--stoch-smooth", type=int, default=3, help="stochastic D smoothing")
-    p.add_argument("--entry-threshold", type=float, default=0.45, help="buy score threshold")
-    p.add_argument("--exit-threshold", type=float, default=-0.25, help="sell score threshold")
+    p.add_argument("--entry-threshold", type=float, default=0.40, help="buy score threshold")
+    p.add_argument("--exit-threshold", type=float, default=-0.28, help="sell score threshold")
 
     # Risk and execution
     p.add_argument("--cash-buffer-pct", type=float, default=0.15, help="keep this cash ratio unused")
     p.add_argument("--stop-loss-pct", type=float, default=0.012, help="stop-loss ratio")
     p.add_argument("--take-profit-pct", type=float, default=0.020, help="take-profit ratio")
     p.add_argument("--cooldown-bars", type=int, default=8, help="bars to wait after exit")
-    p.add_argument("--entry-confirm-bars", type=int, default=5, help="consecutive buy signals required")
+    p.add_argument("--entry-confirm-bars", type=int, default=4, help="consecutive buy signals required")
     p.add_argument("--exit-confirm-bars", type=int, default=4, help="consecutive sell signals required")
     p.add_argument("--min-hold-bars", type=int, default=8, help="minimum bars to hold before normal exit")
     p.add_argument("--fee-rate", type=float, default=0.0005, help="fee rate for sizing/pnl")
@@ -94,8 +96,9 @@ def get_minute_bars(
         "appSecret": app_secret,
         "tr_id": "FHKST03010200",
     }
-    ymd = datetime.now().strftime("%Y%m%d")
-    cursor_time = "153000"
+    now_kst = datetime.now(KST)
+    ymd = now_kst.strftime("%Y%m%d")
+    cursor_time = now_kst.strftime("%H%M%S")
     rows_all: List[Dict] = []
     seen = set()
 
