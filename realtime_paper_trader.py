@@ -56,6 +56,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--stop-loss-pct", type=float, default=0.012, help="stop-loss ratio")
     p.add_argument("--take-profit-pct", type=float, default=0.020, help="take-profit ratio")
     p.add_argument("--cooldown-bars", type=int, default=3, help="bars to wait after exit")
+    p.add_argument("--entry-confirm-bars", type=int, default=2, help="consecutive buy signals required")
+    p.add_argument("--exit-confirm-bars", type=int, default=2, help="consecutive sell signals required")
+    p.add_argument("--min-hold-bars", type=int, default=3, help="minimum bars to hold before normal exit")
+    p.add_argument("--fee-rate", type=float, default=0.0005, help="fee rate for sizing/pnl")
+    p.add_argument("--paper-cash", type=float, default=10_000_000, help="fallback paper cash when balance inquiry fails")
     p.add_argument("--retry", type=int, default=3, help="quote retry count")
     p.add_argument("--throttle-ms", type=int, default=800, help="delay between symbols in milliseconds")
     p.add_argument("--dry-run", action="store_true", help="print only, no order requests")
@@ -362,9 +367,17 @@ def main() -> None:
     has_position: Dict[str, bool] = {s: False for s in symbols}
     held_qty: Dict[str, int] = {s: 0 for s in symbols}
     entry_price: Dict[str, float] = {s: 0.0 for s in symbols}
+    entry_total_cost: Dict[str, float] = {s: 0.0 for s in symbols}
+    held_bars: Dict[str, int] = {s: 0 for s in symbols}
     cooldown_left: Dict[str, int] = {s: 0 for s in symbols}
+    entry_streak: Dict[str, int] = {s: 0 for s in symbols}
+    exit_streak: Dict[str, int] = {s: 0 for s in symbols}
     realized_pnl_krw: Dict[str, float] = {s: 0.0 for s in symbols}
     last_price: Dict[str, float] = {s: 0.0 for s in symbols}
+    paper_cash = args.paper_cash
+    last_known_cash: float | None = None
+    predicted_cash: float | None = None
+    cash_fail_streak = 0
 
     print("start realtime paper trader")
     print(
@@ -372,18 +385,24 @@ def main() -> None:
         f"model=multi_factor(short={args.short},long={args.long},mom={args.mom_window},"
         f"stoch={args.stoch_window}/{args.stoch_smooth})"
     )
-    try:
-        initial_cash = get_orderable_cash(
-            base_url=args.base_url,
-            token=token,
-            app_key=args.app_key,
-            app_secret=args.app_secret,
-            cano=args.cano,
-            acnt_prdt_cd=args.acnt_prdt_cd,
-        )
-        print(f"initial_orderable_cash={initial_cash:,.0f} KRW")
-    except Exception as e:
-        print(f"initial_orderable_cash=ERROR ({str(e)[:200]})")
+    if args.dry_run:
+        print(f"paper_cash={paper_cash:,.0f} KRW")
+    else:
+        try:
+            initial_cash = get_orderable_cash(
+                base_url=args.base_url,
+                token=token,
+                app_key=args.app_key,
+                app_secret=args.app_secret,
+                cano=args.cano,
+                acnt_prdt_cd=args.acnt_prdt_cd,
+            )
+            last_known_cash = initial_cash
+            predicted_cash = initial_cash
+            print(f"initial_orderable_cash={initial_cash:,.0f} KRW")
+        except Exception as e:
+            print(f"initial_orderable_cash=ERROR ({str(e)[:200]})")
+            raise RuntimeError("initial cash inquiry failed in live mode")
 
     while True:
         try:
@@ -427,32 +446,73 @@ def main() -> None:
                         signal = 0
 
                 if has_position[symbol] and entry_price[symbol] > 0:
+                    held_bars[symbol] += 1
                     pnl_pct = (last_px / entry_price[symbol]) - 1.0
                     if pnl_pct <= -args.stop_loss_pct or pnl_pct >= args.take_profit_pct:
                         signal = -1
 
+                if signal == 1:
+                    entry_streak[symbol] += 1
+                    exit_streak[symbol] = 0
+                elif signal == -1:
+                    exit_streak[symbol] += 1
+                    entry_streak[symbol] = 0
+                else:
+                    entry_streak[symbol] = 0
+                    exit_streak[symbol] = 0
+
                 if signal == 1 and not has_position[symbol]:
-                    try:
-                        orderable_cash = get_orderable_cash(
-                            base_url=args.base_url,
-                            token=token,
-                            app_key=args.app_key,
-                            app_secret=args.app_secret,
-                            cano=args.cano,
-                            acnt_prdt_cd=args.acnt_prdt_cd,
+                    if entry_streak[symbol] < args.entry_confirm_bars:
+                        print(
+                            f"[{ts}] {symbol} hold px={last_px:.0f} pos={has_position[symbol]} "
+                            f"score={m.get('score', 0):.2f} entry_wait={entry_streak[symbol]}/{args.entry_confirm_bars}"
                         )
-                    except Exception as e:
-                        print(f"[{ts}] {symbol} cash inquiry error: {str(e)[:180]}")
                         time.sleep(max(0, args.throttle_ms) / 1000.0)
                         continue
+
+                    if args.dry_run:
+                        orderable_cash = paper_cash
+                    else:
+                        try:
+                            orderable_cash = get_orderable_cash(
+                                base_url=args.base_url,
+                                token=token,
+                                app_key=args.app_key,
+                                app_secret=args.app_secret,
+                                cano=args.cano,
+                                acnt_prdt_cd=args.acnt_prdt_cd,
+                            )
+                            last_known_cash = orderable_cash
+                            predicted_cash = orderable_cash
+                            cash_fail_streak = 0
+                        except Exception as e:
+                            cash_fail_streak += 1
+                            fallback_cash = predicted_cash if predicted_cash is not None else last_known_cash
+                            if fallback_cash is None:
+                                print(f"[{ts}] {symbol} cash inquiry error: {str(e)[:180]} (no fallback)")
+                                time.sleep(max(0, args.throttle_ms) / 1000.0)
+                                continue
+                            orderable_cash = fallback_cash
+                            print(
+                                f"[{ts}] {symbol} cash inquiry error -> using predicted cash "
+                                f"{orderable_cash:,.0f} KRW (fail_streak={cash_fail_streak})"
+                            )
                     usable_cash = max(0.0, orderable_cash * (1.0 - args.cash_buffer_pct))
-                    qty = int(usable_cash // (last_px * 1.0005))
+                    qty = int(usable_cash // (last_px * (1.0 + args.fee_rate)))
+                    buy_cost = qty * last_px
+                    buy_fee = buy_cost * args.fee_rate
+                    total_buy = buy_cost + buy_fee
+                    if args.dry_run and total_buy > paper_cash:
+                        qty = int(paper_cash // (last_px * (1.0 + args.fee_rate)))
+                        buy_cost = qty * last_px
+                        buy_fee = buy_cost * args.fee_rate
+                        total_buy = buy_cost + buy_fee
                     if args.dry_run:
                         print(
                             f"[{ts}] {symbol} BUY px={last_px:.0f} qty={qty} "
                             f"score={m.get('score', 0):.2f} mom={m.get('mom', 0)*100:.2f}% "
                             f"k={m.get('k', 0):.1f} d={m.get('d', 0):.1f} "
-                            f"cash={orderable_cash:.0f} usable={usable_cash:.0f} (dry-run)"
+                            f"cash={orderable_cash:.0f} usable={usable_cash:.0f} fee={buy_fee:,.0f} (dry-run)"
                         )
                     else:
                         res = place_order(
@@ -468,9 +528,18 @@ def main() -> None:
                         )
                         print(f"[{ts}] {symbol} BUY order -> {res.get('msg1', '')} / rt_cd={res.get('rt_cd')}")
                     if qty > 0:
+                        if args.dry_run:
+                            paper_cash -= total_buy
+                        else:
+                            if predicted_cash is None:
+                                predicted_cash = orderable_cash
+                            predicted_cash = max(0.0, predicted_cash - total_buy)
                         has_position[symbol] = True
                         held_qty[symbol] = qty
                         entry_price[symbol] = last_px
+                        entry_total_cost[symbol] = total_buy
+                        held_bars[symbol] = 0
+                        entry_streak[symbol] = 0
                         total_realized = sum(realized_pnl_krw.values())
                         total_unrealized = sum(
                             (last_price[s] - entry_price[s]) * held_qty[s]
@@ -482,14 +551,32 @@ def main() -> None:
                             f"unrealized={total_unrealized:,.0f} KRW"
                         )
                 elif signal == -1 and has_position[symbol]:
+                    if held_bars[symbol] < args.min_hold_bars:
+                        print(
+                            f"[{ts}] {symbol} hold px={last_px:.0f} pos={has_position[symbol]} "
+                            f"score={m.get('score', 0):.2f} hold_lock={held_bars[symbol]}/{args.min_hold_bars}"
+                        )
+                        time.sleep(max(0, args.throttle_ms) / 1000.0)
+                        continue
+                    if exit_streak[symbol] < args.exit_confirm_bars:
+                        print(
+                            f"[{ts}] {symbol} hold px={last_px:.0f} pos={has_position[symbol]} "
+                            f"score={m.get('score', 0):.2f} exit_wait={exit_streak[symbol]}/{args.exit_confirm_bars}"
+                        )
+                        time.sleep(max(0, args.throttle_ms) / 1000.0)
+                        continue
+
                     qty = held_qty[symbol]
-                    pnl_pct = (last_px / entry_price[symbol] - 1.0) * 100 if entry_price[symbol] > 0 else 0.0
-                    trade_pnl_krw = (last_px - entry_price[symbol]) * qty
+                    sell_gross = last_px * qty
+                    sell_fee = sell_gross * args.fee_rate
+                    sell_net = sell_gross - sell_fee
+                    trade_pnl_krw = sell_net - entry_total_cost[symbol]
+                    pnl_pct = (trade_pnl_krw / entry_total_cost[symbol] * 100.0) if entry_total_cost[symbol] > 0 else 0.0
                     if args.dry_run:
                         print(
                             f"[{ts}] {symbol} SELL px={last_px:.0f} qty={qty} "
                             f"pnl={pnl_pct:.2f}% ({trade_pnl_krw:,.0f} KRW) "
-                            f"score={m.get('score', 0):.2f} (dry-run)"
+                            f"score={m.get('score', 0):.2f} fee={sell_fee:,.0f} (dry-run)"
                         )
                     else:
                         res = place_order(
@@ -504,10 +591,19 @@ def main() -> None:
                             side="sell",
                         )
                         print(f"[{ts}] {symbol} SELL order -> {res.get('msg1', '')} / rt_cd={res.get('rt_cd')}")
+                    if args.dry_run:
+                        paper_cash += sell_net
+                    else:
+                        if predicted_cash is None:
+                            predicted_cash = 0.0
+                        predicted_cash += sell_net
                     realized_pnl_krw[symbol] += trade_pnl_krw
                     has_position[symbol] = False
                     held_qty[symbol] = 0
                     entry_price[symbol] = 0.0
+                    entry_total_cost[symbol] = 0.0
+                    held_bars[symbol] = 0
+                    exit_streak[symbol] = 0
                     cooldown_left[symbol] = args.cooldown_bars
                     total_realized = sum(realized_pnl_krw.values())
                     total_unrealized = sum(

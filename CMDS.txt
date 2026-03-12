@@ -1,7 +1,0 @@
-50174281-01
-PSUFxFmmq0gl18L0ay30sQCmlozqdNtF8jbz
-MNrgm8Z8tRPY5OE+I9IbkhqjWsBPOJIOqLk/XPhcTpTYKOn3bWJ+7h+VVw5HTTultDtUUWrUHe/sfag2ozRqMIhh3WWYzjRYy3pwEaSnZGzinx1cKSsKTSfrxYty2MArJpCmRSBofPE3zYGygSO93ypTetO16Nr9JejDS7bupzMgh9iWRao=
-
-144.24.84.161
-
-ssh -i "C:\Users\henon\Downloads\ssh-key-2026-03-11.key" opc@144.24.84.161
