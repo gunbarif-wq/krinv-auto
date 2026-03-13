@@ -111,8 +111,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--retry", type=int, default=3, help="quote retry count")
     p.add_argument("--throttle-ms", type=int, default=800, help="delay between symbols in milliseconds")
     p.add_argument("--dry-run", action="store_true", help="print only, no order requests")
-    p.add_argument("--log-file", default="data/realtime_events.txt", help="important event log path")
-    p.add_argument("--log-rotate-minutes", type=int, default=10, help="create a new log file every N minutes")
+    p.add_argument("--log-file", default="logs/realtime_events.txt", help="important event log path")
+    p.add_argument("--log-rotate-minutes", type=int, default=1440, help="create a new log file every N minutes")
 
     # Credentials
     p.add_argument("--base-url", default=os.getenv("KIS_BASE_URL", VTS_BASE_URL))
@@ -557,10 +557,13 @@ def main() -> None:
 
     def current_log_path(now: datetime) -> Path:
         rotate = max(1, args.log_rotate_minutes)
-        bucket_minute = (now.minute // rotate) * rotate
-        bucket = now.replace(minute=bucket_minute, second=0, microsecond=0)
+        if rotate >= 1440:
+            bucket = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        else:
+            bucket_minute = (now.minute // rotate) * rotate
+            bucket = now.replace(minute=bucket_minute, second=0, microsecond=0)
         return base_log_path.with_name(
-            f"{base_log_path.stem}_{bucket.strftime('%Y%m%d_%H%M')}{base_log_path.suffix or '.txt'}"
+            f"{base_log_path.stem}_{bucket.strftime('%Y%m%d')}{base_log_path.suffix or '.txt'}"
         )
 
     def emit(message: str, *, save: bool = False) -> None:
