@@ -382,9 +382,23 @@ def place_order(
         "hashkey": hashkey,
         "content-type": "application/json",
     }
-    r = requests.post(url, headers=headers, data=json.dumps(body), timeout=15)
-    r.raise_for_status()
-    return r.json()
+    last_err: Exception | None = None
+    for i in range(4):  # first try + 3 retries
+        try:
+            r = requests.post(url, headers=headers, data=json.dumps(body), timeout=15)
+            r.raise_for_status()
+            return r.json()
+        except requests.RequestException as e:
+            last_err = e
+            # Retry only for transient classes: 5xx or network/timeout.
+            status = getattr(getattr(e, "response", None), "status_code", None)
+            if status is not None and status < 500:
+                raise
+            if i < 3:
+                time.sleep(0.6 * (i + 1))
+    if last_err is not None:
+        raise last_err
+    raise RuntimeError("unknown order error")
 
 
 def get_orderable_cash(
