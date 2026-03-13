@@ -569,6 +569,9 @@ def main() -> None:
     def emit(message: str, *, save: bool = False) -> None:
         print(message)
         if save:
+            is_order_event = (">>> BUY <<<" in message) or ("<<< SELL >>>" in message)
+            if not is_order_event:
+                return
             path = current_log_path(datetime.now())
             with path.open("a", encoding="utf-8") as f:
                 f.write(message + "\n")

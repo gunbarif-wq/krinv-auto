@@ -3,3 +3,4 @@
 .env
 .kis_token_cache.json
 data/
+logs/
