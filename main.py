@@ -57,6 +57,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--interval-sec", type=int, default=30, help="main loop interval in seconds")
     p.add_argument("--bar-minutes", type=int, choices=[1, 3, 5], default=1, help="signal timeframe")
     p.add_argument("--after-close-action", choices=["wait", "exit"], default="wait", help="behavior after market close")
+    p.add_argument(
+        "--strategy-mode",
+        choices=["multi_factor", "ma_cross_level"],
+        default="multi_factor",
+        help="signal strategy mode",
+    )
 
     # Signal parameters
     p.add_argument("--short", type=int, default=5, help="short SMA window")
@@ -66,6 +72,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--stoch-smooth", type=int, default=3, help="stochastic D smoothing")
     p.add_argument("--entry-threshold", type=float, default=0.40, help="buy score threshold")
     p.add_argument("--exit-threshold", type=float, default=-0.28, help="sell score threshold")
+    p.add_argument("--ma-a", type=int, default=3, help="A moving-average window")
+    p.add_argument("--ma-b", type=int, default=10, help="B moving-average window")
+    p.add_argument("--cross-level-window", type=int, default=60, help="lookback bars for [0,1] normalization")
+    p.add_argument("--cross-buy-level", type=float, default=0.75, help="buy threshold for ma_cross_level")
+    p.add_argument("--cross-sell-level", type=float, default=0.25, help="sell threshold for ma_cross_level")
 
     # Risk and execution
     p.add_argument("--cash-buffer-pct", type=float, default=0.15, help="keep this cash ratio unused")
@@ -264,6 +275,51 @@ def multi_factor_signal(
         "short_sma": short_sma,
         "long_sma": long_sma,
     }
+
+
+def ma_cross_level_signal(
+    ohlc: List[Dict[str, float]],
+    ma_a: int,
+    ma_b: int,
+    level_window: int,
+    buy_level: float,
+    sell_level: float,
+) -> tuple[int, Dict[str, float]]:
+    if ma_a <= 0 or ma_b <= 0:
+        return 0, {"score": 0.0}
+    short = min(ma_a, ma_b)
+    long = max(ma_a, ma_b)
+    need = max(long + 1, level_window)
+
+    closes = [x["close"] for x in ohlc]
+    if len(closes) < need:
+        return 0, {"score": 0.0}
+
+    short_now = sum(closes[-short:]) / short
+    long_now = sum(closes[-long:]) / long
+    short_prev = sum(closes[-1 - short : -1]) / short
+    long_prev = sum(closes[-1 - long : -1]) / long
+    spread_prev = short_prev - long_prev
+    spread_now = short_now - long_now
+
+    recent = closes[-level_window:]
+    lo = min(recent)
+    hi = max(recent)
+    if hi == lo:
+        level = 0.5
+    else:
+        level = (closes[-1] - lo) / (hi - lo)
+    level = max(0.0, min(1.0, level))
+
+    cross_up = spread_prev <= 0 and spread_now > 0
+    cross_down = spread_prev >= 0 and spread_now < 0
+    if cross_up and level >= buy_level:
+        signal = 1
+    elif cross_down and level <= sell_level:
+        signal = -1
+    else:
+        signal = 0
+    return signal, {"score": level, "ma_short": short_now, "ma_long": long_now}
 
 
 def get_hashkey(base_url: str, app_key: str, app_secret: str, body: Dict) -> str:
@@ -480,8 +536,8 @@ def main() -> None:
     emit("start realtime paper trader", save=True)
     emit(
         f"symbols={','.join(symbols)} dry_run={args.dry_run} bar={args.bar_minutes}m "
-        f"model=multi_factor(short={args.short},long={args.long},mom={args.mom_window},"
-        f"stoch={args.stoch_window}/{args.stoch_smooth})",
+        f"model={args.strategy_mode}(short={args.short},long={args.long},mom={args.mom_window},"
+        f"stoch={args.stoch_window}/{args.stoch_smooth},ma_a={args.ma_a},ma_b={args.ma_b})",
         save=True,
     )
     if args.dry_run:
@@ -565,16 +621,26 @@ def main() -> None:
                 if not ohlc:
                     emit(f"[{ts}] {symbol} no data")
                     continue
-                signal, m = multi_factor_signal(
-                    ohlc=ohlc,
-                    short=args.short,
-                    long=args.long,
-                    mom_window=args.mom_window,
-                    stoch_window=args.stoch_window,
-                    stoch_smooth=args.stoch_smooth,
-                    entry_threshold=args.entry_threshold,
-                    exit_threshold=args.exit_threshold,
-                )
+                if args.strategy_mode == "ma_cross_level":
+                    signal, m = ma_cross_level_signal(
+                        ohlc=ohlc,
+                        ma_a=args.ma_a,
+                        ma_b=args.ma_b,
+                        level_window=args.cross_level_window,
+                        buy_level=args.cross_buy_level,
+                        sell_level=args.cross_sell_level,
+                    )
+                else:
+                    signal, m = multi_factor_signal(
+                        ohlc=ohlc,
+                        short=args.short,
+                        long=args.long,
+                        mom_window=args.mom_window,
+                        stoch_window=args.stoch_window,
+                        stoch_smooth=args.stoch_smooth,
+                        entry_threshold=args.entry_threshold,
+                        exit_threshold=args.exit_threshold,
+                    )
                 last_px = ohlc[-1]["close"]
                 last_price[symbol] = last_px
                 bar_ts = ""
@@ -612,10 +678,11 @@ def main() -> None:
                     exit_streak[symbol] = 0
 
                 if signal == 1 and not has_position[symbol]:
-                    if entry_streak[symbol] < args.entry_confirm_bars:
+                    require_entry_confirm = args.entry_confirm_bars if args.strategy_mode == "multi_factor" else 1
+                    if entry_streak[symbol] < require_entry_confirm:
                         cycle_summary.append(
                             f"{symbol} px={last_px:.0f} score={m.get('score', 0):.2f} "
-                            f"cd={cooldown_left[symbol]} e={entry_streak[symbol]}/{args.entry_confirm_bars}"
+                            f"cd={cooldown_left[symbol]} e={entry_streak[symbol]}/{require_entry_confirm}"
                         )
                         time.sleep(max(0, args.throttle_ms) / 1000.0)
                         continue
@@ -736,10 +803,11 @@ def main() -> None:
                         )
                         time.sleep(max(0, args.throttle_ms) / 1000.0)
                         continue
-                    if exit_streak[symbol] < args.exit_confirm_bars:
+                    require_exit_confirm = args.exit_confirm_bars if args.strategy_mode == "multi_factor" else 1
+                    if exit_streak[symbol] < require_exit_confirm:
                         cycle_summary.append(
                             f"{symbol} px={last_px:.0f} score={m.get('score', 0):.2f} "
-                            f"cd={cooldown_left[symbol]} x={exit_streak[symbol]}/{args.exit_confirm_bars}"
+                            f"cd={cooldown_left[symbol]} x={exit_streak[symbol]}/{require_exit_confirm}"
                         )
                         time.sleep(max(0, args.throttle_ms) / 1000.0)
                         continue

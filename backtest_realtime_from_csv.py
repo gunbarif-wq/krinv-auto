@@ -7,7 +7,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Tuple
 
-from main import multi_factor_signal
+from main import ma_cross_level_signal, multi_factor_signal
 
 
 @dataclass
@@ -33,11 +33,17 @@ def parse_args() -> argparse.Namespace:
 
     p.add_argument("--short", type=int, default=5)
     p.add_argument("--long", type=int, default=20)
+    p.add_argument("--strategy-mode", choices=["multi_factor", "ma_cross_level"], default="multi_factor")
     p.add_argument("--mom-window", type=int, default=12)
     p.add_argument("--stoch-window", type=int, default=14)
     p.add_argument("--stoch-smooth", type=int, default=3)
     p.add_argument("--entry-threshold", type=float, default=0.45)
     p.add_argument("--exit-threshold", type=float, default=-0.25)
+    p.add_argument("--ma-a", type=int, default=5)
+    p.add_argument("--ma-b", type=int, default=20)
+    p.add_argument("--cross-level-window", type=int, default=60)
+    p.add_argument("--cross-buy-level", type=float, default=0.8)
+    p.add_argument("--cross-sell-level", type=float, default=0.2)
     p.add_argument("--entry-confirm-bars", type=int, default=5)
     p.add_argument("--exit-confirm-bars", type=int, default=4)
     p.add_argument("--min-hold-bars", type=int, default=8)
@@ -113,16 +119,26 @@ def main() -> None:
             last_price[sym] = last_px
             st = state[sym]
 
-            signal, _ = multi_factor_signal(
-                ohlc=ohlc_hist[sym],
-                short=args.short,
-                long=args.long,
-                mom_window=args.mom_window,
-                stoch_window=args.stoch_window,
-                stoch_smooth=args.stoch_smooth,
-                entry_threshold=args.entry_threshold,
-                exit_threshold=args.exit_threshold,
-            )
+            if args.strategy_mode == "ma_cross_level":
+                signal, _ = ma_cross_level_signal(
+                    ohlc=ohlc_hist[sym],
+                    ma_a=args.ma_a,
+                    ma_b=args.ma_b,
+                    level_window=args.cross_level_window,
+                    buy_level=args.cross_buy_level,
+                    sell_level=args.cross_sell_level,
+                )
+            else:
+                signal, _ = multi_factor_signal(
+                    ohlc=ohlc_hist[sym],
+                    short=args.short,
+                    long=args.long,
+                    mom_window=args.mom_window,
+                    stoch_window=args.stoch_window,
+                    stoch_smooth=args.stoch_smooth,
+                    entry_threshold=args.entry_threshold,
+                    exit_threshold=args.exit_threshold,
+                )
 
             if st.cooldown_left > 0:
                 st.cooldown_left -= 1
@@ -146,7 +162,8 @@ def main() -> None:
                 st.exit_streak = 0
 
             if signal == 1 and not st.has_position:
-                if st.entry_streak < args.entry_confirm_bars:
+                require_entry_confirm = args.entry_confirm_bars if args.strategy_mode == "multi_factor" else 1
+                if st.entry_streak < require_entry_confirm:
                     continue
 
                 mtm_positions = sum(
@@ -188,7 +205,8 @@ def main() -> None:
             elif signal == -1 and st.has_position:
                 if st.held_bars < args.min_hold_bars:
                     continue
-                if st.exit_streak < args.exit_confirm_bars:
+                require_exit_confirm = args.exit_confirm_bars if args.strategy_mode == "multi_factor" else 1
+                if st.exit_streak < require_exit_confirm:
                     continue
 
                 sell_gross = last_px * st.held_qty
@@ -218,6 +236,7 @@ def main() -> None:
     ret_pct = (final_equity / args.cash - 1.0) * 100.0
 
     print("=== Replay Backtest Result ===")
+    print(f"strategy       : {args.strategy_mode}")
     print(f"symbols        : {','.join(sorted(series_by_symbol.keys()))}")
     print(f"initial_cash   : {args.cash:,.0f} KRW")
     print(f"final_equity   : {final_equity:,.0f} KRW")
