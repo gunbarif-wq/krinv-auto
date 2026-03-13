@@ -101,7 +101,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--cross-sell-level", type=float, default=0.25, help="sell threshold for ma_cross_level")
 
     # Risk and execution
-    p.add_argument("--cash-buffer-pct", type=float, default=0.15, help="keep this cash ratio unused")
+    p.add_argument("--cash-buffer-pct", type=float, default=0.10, help="keep this cash ratio unused")
     p.add_argument("--stop-loss-pct", type=float, default=0.012, help="stop-loss ratio")
     p.add_argument("--take-profit-pct", type=float, default=0.020, help="take-profit ratio")
     p.add_argument("--cooldown-bars", type=int, default=8, help="bars to wait after exit")
@@ -115,6 +115,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--min-order-krw", type=float, default=200_000, help="skip buy when target order value is below this amount")
     p.add_argument("--retry", type=int, default=3, help="quote retry count")
     p.add_argument("--throttle-ms", type=int, default=800, help="delay between symbols in milliseconds")
+    p.add_argument(
+        "--no-buy-before-close-min",
+        type=int,
+        default=15,
+        help="block new buys during last N minutes before market close",
+    )
     p.add_argument("--dry-run", action="store_true", help="print only, no order requests")
     p.add_argument("--log-file", default="logs/realtime_events.txt", help="important event log path")
     p.add_argument("--log-rotate-minutes", type=int, default=1440, help="create a new log file every N minutes")
@@ -672,6 +678,7 @@ def main() -> None:
             mins_to_close = (close_dt - now_kst).total_seconds() / 60.0
             ease_sell_window = is_weekday and in_session and (3.0 < mins_to_close <= 30.0)
             hard_liquidation_window = is_weekday and in_session and (0.0 <= mins_to_close <= 3.0)
+            no_new_buy_window = is_weekday and in_session and (0.0 <= mins_to_close <= max(0, args.no_buy_before_close_min))
             # 0.0 at 30min left -> 1.0 at 3min left
             ease_ratio = 0.0
             if ease_sell_window:
@@ -785,6 +792,27 @@ def main() -> None:
                 exit_streak[symbol] = st.exit_streak
 
                 if signal == 1 and not has_position[symbol]:
+                    now_kst_symbol = datetime.now(KST)
+                    hhmm_symbol = now_kst_symbol.hour * 100 + now_kst_symbol.minute
+                    in_session_symbol = (now_kst_symbol.weekday() < 5) and (900 <= hhmm_symbol <= 1530)
+                    mins_to_close_symbol = (
+                        now_kst_symbol.replace(hour=15, minute=30, second=0, microsecond=0) - now_kst_symbol
+                    ).total_seconds() / 60.0
+                    no_new_buy_window_symbol = in_session_symbol and (
+                        0.0 <= mins_to_close_symbol <= max(0, args.no_buy_before_close_min)
+                    )
+                    if (not in_session_symbol) or no_new_buy_window_symbol:
+                        cycle_summary.append(
+                            f"{symbol} score={m.get('score', 0):.2f}{cross_info} cd={cooldown_left[symbol]} no_new_buy"
+                        )
+                        time.sleep(max(0, args.throttle_ms) / 1000.0)
+                        continue
+                    if no_new_buy_window:
+                        cycle_summary.append(
+                            f"{symbol} score={m.get('score', 0):.2f}{cross_info} cd={cooldown_left[symbol]} no_new_buy"
+                        )
+                        time.sleep(max(0, args.throttle_ms) / 1000.0)
+                        continue
                     entry_wait = transition.get("entry_wait")
                     if entry_wait:
                         cur, req = entry_wait
@@ -873,6 +901,7 @@ def main() -> None:
                             f"reason={buy_reason} (dry-run)",
                             save=True,
                         )
+                        buy_filled = True
                     else:
                         res = place_order(
                             base_url=args.base_url,
@@ -885,12 +914,20 @@ def main() -> None:
                             qty=qty,
                             side="buy",
                         )
-                        emit(
-                            f"[{ts}] >>> BUY <<< {symbol} bar={bar_ts or '-'} qty={qty} px={last_px:.0f} "
-                            f"reason={buy_reason} order -> {res.get('msg1', '')} / rt_cd={res.get('rt_cd')}",
-                            save=True,
-                        )
-                    if qty > 0:
+                        buy_filled = str(res.get("rt_cd", "")) == "0"
+                        if buy_filled:
+                            emit(
+                                f"[{ts}] >>> BUY <<< {symbol} bar={bar_ts or '-'} qty={qty} px={last_px:.0f} "
+                                f"reason={buy_reason} order -> {res.get('msg1', '')} / rt_cd={res.get('rt_cd')}",
+                                save=True,
+                            )
+                        else:
+                            emit(
+                                f"[{ts}] [BUY_REJECTED] {symbol} bar={bar_ts or '-'} qty={qty} px={last_px:.0f} "
+                                f"reason={buy_reason} order -> {res.get('msg1', '')} / rt_cd={res.get('rt_cd')}",
+                                save=True,
+                            )
+                    if qty > 0 and buy_filled:
                         if args.dry_run:
                             paper_cash -= total_buy
                         else:
@@ -947,6 +984,7 @@ def main() -> None:
                             f"score={m.get('score', 0):.2f} fee={sell_fee:,.0f} reason={sell_reason} (dry-run)",
                             save=True,
                         )
+                        sell_filled = True
                     else:
                         res = place_order(
                             base_url=args.base_url,
@@ -959,11 +997,22 @@ def main() -> None:
                             qty=qty,
                             side="sell",
                         )
-                        emit(
-                            f"[{ts}] <<< SELL >>> {symbol} bar={bar_ts or '-'} qty={qty} px={last_px:.0f} "
-                            f"reason={sell_reason} order -> {res.get('msg1', '')} / rt_cd={res.get('rt_cd')}",
-                            save=True,
-                        )
+                        sell_filled = str(res.get("rt_cd", "")) == "0"
+                        if sell_filled:
+                            emit(
+                                f"[{ts}] <<< SELL >>> {symbol} bar={bar_ts or '-'} qty={qty} px={last_px:.0f} "
+                                f"reason={sell_reason} order -> {res.get('msg1', '')} / rt_cd={res.get('rt_cd')}",
+                                save=True,
+                            )
+                        else:
+                            emit(
+                                f"[{ts}] [SELL_REJECTED] {symbol} bar={bar_ts or '-'} qty={qty} px={last_px:.0f} "
+                                f"reason={sell_reason} order -> {res.get('msg1', '')} / rt_cd={res.get('rt_cd')}",
+                                save=True,
+                            )
+                    if not sell_filled:
+                        time.sleep(max(0, args.throttle_ms) / 1000.0)
+                        continue
                     if args.dry_run:
                         paper_cash += sell_net
                     else:
@@ -1004,6 +1053,7 @@ def main() -> None:
                                 f"score={m.get('score', 0):.2f} fee={sell_fee:,.0f} reason=hard_close (dry-run)",
                                 save=True,
                             )
+                            sell_filled = True
                         else:
                             res = place_order(
                                 base_url=args.base_url,
@@ -1016,11 +1066,22 @@ def main() -> None:
                                 qty=qty,
                                 side="sell",
                             )
-                            emit(
-                                f"[{ts}] <<< SELL >>> {symbol} bar={bar_ts or '-'} qty={qty} px={last_px:.0f} "
-                                f"reason=hard_close order -> {res.get('msg1', '')} / rt_cd={res.get('rt_cd')}",
-                                save=True,
-                            )
+                            sell_filled = str(res.get("rt_cd", "")) == "0"
+                            if sell_filled:
+                                emit(
+                                    f"[{ts}] <<< SELL >>> {symbol} bar={bar_ts or '-'} qty={qty} px={last_px:.0f} "
+                                    f"reason=hard_close order -> {res.get('msg1', '')} / rt_cd={res.get('rt_cd')}",
+                                    save=True,
+                                )
+                            else:
+                                emit(
+                                    f"[{ts}] [SELL_REJECTED] {symbol} bar={bar_ts or '-'} qty={qty} px={last_px:.0f} "
+                                    f"reason=hard_close order -> {res.get('msg1', '')} / rt_cd={res.get('rt_cd')}",
+                                    save=True,
+                                )
+                        if not sell_filled:
+                            time.sleep(max(0, args.throttle_ms) / 1000.0)
+                            continue
                         if args.dry_run:
                             paper_cash += sell_net
                         else:

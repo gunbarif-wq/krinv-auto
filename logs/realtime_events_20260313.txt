@@ -1,0 +1,6 @@
+﻿[13:08:47] >>> BUY <<< 012450 bar=2026-03-13 13:08:00 qty=1 px=1477000 reason=ma_cross_crossup_level order -> 모의투자 매수주문이 완료 되었습니다. / rt_cd=0
+[14:33:09] >>> BUY <<< 211270 bar=2026-03-13 14:33:00 qty=162 px=17480 reason=ma_cross_crossup_level order -> 모의투자 매수주문이 완료 되었습니다. / rt_cd=0
+[15:03:17] <<< SELL >>> 211270 bar=2026-03-13 15:03:00 qty=162 px=17340 reason=signal order -> 모의투자 매도주문이 완료 되었습니다. / rt_cd=0
+[15:10:00] >>> BUY <<< 272210 bar=2026-03-13 15:10:00 qty=19 px=142900 reason=ma_cross_crossup_level order -> 모의투자 매수주문이 완료 되었습니다. / rt_cd=0
+[15:27:38] <<< SELL >>> 012450 bar=2026-03-13 15:27:00 qty=1 px=1480000 reason=hard_close order -> 모의투자 매도주문이 완료 되었습니다. / rt_cd=0
+[15:28:37] <<< SELL >>> 272210 bar=2026-03-13 15:28:00 qty=19 px=143050 reason=hard_close order -> 모의투자 매도주문이 완료 되었습니다. / rt_cd=0
