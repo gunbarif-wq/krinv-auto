@@ -865,8 +865,8 @@ def main() -> None:
                             side="buy",
                         )
                         emit(
-                            f"[{ts}] >>> BUY <<< {symbol} bar={bar_ts or '-'} order -> "
-                            f"{res.get('msg1', '')} / rt_cd={res.get('rt_cd')}",
+                            f"[{ts}] >>> BUY <<< {symbol} bar={bar_ts or '-'} qty={qty} px={last_px:.0f} "
+                            f"order -> {res.get('msg1', '')} / rt_cd={res.get('rt_cd')}",
                             save=True,
                         )
                     if qty > 0:
@@ -945,8 +945,8 @@ def main() -> None:
                             side="sell",
                         )
                         emit(
-                            f"[{ts}] <<< SELL >>> {symbol} bar={bar_ts or '-'} order -> "
-                            f"{res.get('msg1', '')} / rt_cd={res.get('rt_cd')}",
+                            f"[{ts}] <<< SELL >>> {symbol} bar={bar_ts or '-'} qty={qty} px={last_px:.0f} "
+                            f"order -> {res.get('msg1', '')} / rt_cd={res.get('rt_cd')}",
                             save=True,
                         )
                     if args.dry_run:
@@ -1002,8 +1002,8 @@ def main() -> None:
                                 side="sell",
                             )
                             emit(
-                                f"[{ts}] <<< SELL >>> {symbol} bar={bar_ts or '-'} order -> "
-                                f"{res.get('msg1', '')} / rt_cd={res.get('rt_cd')} (hard_close)",
+                                f"[{ts}] <<< SELL >>> {symbol} bar={bar_ts or '-'} qty={qty} px={last_px:.0f} "
+                                f"order -> {res.get('msg1', '')} / rt_cd={res.get('rt_cd')} (hard_close)",
                                 save=True,
                             )
                         if args.dry_run:
