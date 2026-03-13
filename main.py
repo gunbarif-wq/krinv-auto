@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 import time
+import math
 from pathlib import Path
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -22,18 +23,8 @@ DEFAULT_SYMBOLS = [
     "047810",  # KAI
     "272210",  # Hanwha Systems
     "064350",  # Hyundai Rotem
-    # Space (5)
-    "099320",  # Satrec Initiative
-    "211270",  # AP Satellite
-    "189300",  # Intellian Tech
-    "038870",  # ECOBIT? (legacy space-related supply chain placeholder)
-    "048770",  # TYM? (legacy placeholder)
-    # AI (5)
-    "035420",  # NAVER
-    "000660",  # SK hynix
-    "005930",  # Samsung Electronics
-    "377480",  # MAUM.AI
-    "108860",  # SELVAS AI
+    "103140",  # Poongsan
+    "271940",  # Hanwha Ocean
 ]
 KST = ZoneInfo("Asia/Seoul")
 
@@ -49,6 +40,12 @@ def seconds_until_next_open(now_kst: datetime) -> int:
         d += timedelta(days=1)
     next_open = d.replace(hour=9, minute=0, second=0, microsecond=0)
     return max(1, int((next_open - now_kst).total_seconds()))
+
+
+def required_bars_for_signal(args: argparse.Namespace) -> int:
+    if args.strategy_mode == "ma_cross_level":
+        return max(max(args.ma_a, args.ma_b) + 1, args.cross_level_window)
+    return max(args.long, args.mom_window + 1, args.stoch_window + args.stoch_smooth)
 
 
 def load_dotenv(dotenv_path: str = ".env") -> None:
@@ -75,6 +72,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--symbols", default=",".join(DEFAULT_SYMBOLS), help="comma-separated symbols")
     p.add_argument("--interval-sec", type=int, default=30, help="main loop interval in seconds")
     p.add_argument("--bar-minutes", type=int, choices=[1, 3, 5], default=1, help="signal timeframe")
+    p.add_argument("--startup-lookback-minutes", type=int, default=25, help="extra warmup minutes for startup/immediate trading")
     p.add_argument("--after-close-action", choices=["wait", "exit"], default="wait", help="behavior after market close")
     p.add_argument(
         "--strategy-mode",
@@ -437,15 +435,16 @@ def get_orderable_cash(
     elif isinstance(out1, list):
         candidates.extend([x for x in out1 if isinstance(x, dict)])
 
+    # Only use cash-like fields. Do not use total valuation fields.
     for obj in candidates:
-        for key in ("ord_psbl_cash", "dnca_tot_amt", "prvs_rcdl_excc_amt", "tot_evlu_amt"):
+        for key in ("ord_psbl_cash", "dnca_tot_amt", "prvs_rcdl_excc_amt"):
             v = obj.get(key)
             if v is not None and str(v).strip() != "":
                 try:
                     return float(str(v).replace(",", ""))
                 except ValueError:
                     pass
-    raise RuntimeError("cannot parse orderable cash from balance response")
+    raise RuntimeError("cannot parse orderable cash (ord_psbl_cash/dnca_tot_amt/prvs_rcdl_excc_amt)")
 
 
 def get_positions(
@@ -537,6 +536,9 @@ def main() -> None:
     cash_fail_streak = 0
     base_log_path = Path(args.log_file)
     base_log_path.parent.mkdir(parents=True, exist_ok=True)
+    signal_need = required_bars_for_signal(args)
+    warmup_bars = max(1, math.ceil(args.startup_lookback_minutes / max(1, args.bar_minutes)))
+    count_hint = max(signal_need + warmup_bars, signal_need + 5, 40)
 
     def current_log_path(now: datetime) -> Path:
         rotate = max(1, args.log_rotate_minutes)
@@ -557,7 +559,8 @@ def main() -> None:
     emit(
         f"symbols={','.join(symbols)} dry_run={args.dry_run} bar={args.bar_minutes}m "
         f"model={args.strategy_mode}(short={args.short},long={args.long},mom={args.mom_window},"
-        f"stoch={args.stoch_window}/{args.stoch_smooth},ma_a={args.ma_a},ma_b={args.ma_b})",
+        f"stoch={args.stoch_window}/{args.stoch_smooth},ma_a={args.ma_a},ma_b={args.ma_b}) "
+        f"count_hint={count_hint}",
         save=True,
     )
     if args.dry_run:
@@ -629,7 +632,7 @@ def main() -> None:
                         app_key=args.app_key,
                         app_secret=args.app_secret,
                         symbol=symbol,
-                        count_hint=max(args.long + args.stoch_window + 12, 80),
+                        count_hint=count_hint,
                         retry=args.retry,
                     )
                 except Exception as e:
@@ -749,12 +752,11 @@ def main() -> None:
                         if has_position[s] and held_qty[s] > 0
                     )
                     portfolio_equity_est = orderable_cash + mtm_positions
-                    capped_by_equity = max(0.0, portfolio_equity_est * args.position_size_pct)
                     per_slot_cap = max(0.0, portfolio_equity_est * args.max_invested_pct / max(1, args.max_positions))
                     capped_by_cash = max(0.0, orderable_cash * (1.0 - args.cash_buffer_pct))
                     invested_cap = max(0.0, portfolio_equity_est * args.max_invested_pct)
                     remaining_investable = max(0.0, invested_cap - mtm_positions)
-                    order_budget = min(capped_by_equity, per_slot_cap, capped_by_cash, remaining_investable)
+                    order_budget = min(per_slot_cap, capped_by_cash, remaining_investable)
                     if order_budget < args.min_order_krw:
                         cycle_summary.append(
                             f"{symbol} score={m.get('score', 0):.2f} cd={cooldown_left[symbol]}"
