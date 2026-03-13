@@ -77,7 +77,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--strategy-mode",
         choices=["multi_factor", "ma_cross_level"],
-        default="multi_factor",
+        default="ma_cross_level",
         help="signal strategy mode",
     )
 
@@ -337,7 +337,8 @@ def ma_cross_level_signal(
         signal = -1
     else:
         signal = 0
-    return signal, {"score": level, "ma_short": short_now, "ma_long": long_now}
+    spread_pct = 0.0 if long_now == 0 else (spread_now / long_now) * 100.0
+    return signal, {"score": level, "ma_short": short_now, "ma_long": long_now, "spread_pct": spread_pct}
 
 
 def get_hashkey(base_url: str, app_key: str, app_secret: str, body: Dict) -> str:
@@ -664,6 +665,9 @@ def main() -> None:
                         entry_threshold=args.entry_threshold,
                         exit_threshold=args.exit_threshold,
                     )
+                cross_info = ""
+                if args.strategy_mode == "ma_cross_level":
+                    cross_info = f" gap={m.get('spread_pct', 0.0):+.2f}%"
                 last_px = ohlc[-1]["close"]
                 last_price[symbol] = last_px
                 bar_ts = ""
@@ -704,7 +708,7 @@ def main() -> None:
                     require_entry_confirm = args.entry_confirm_bars if args.strategy_mode == "multi_factor" else 1
                     if entry_streak[symbol] < require_entry_confirm:
                         cycle_summary.append(
-                            f"{symbol} score={m.get('score', 0):.2f} "
+                            f"{symbol} score={m.get('score', 0):.2f}{cross_info} "
                             f"cd={cooldown_left[symbol]} e={entry_streak[symbol]}/{require_entry_confirm}"
                         )
                         time.sleep(max(0, args.throttle_ms) / 1000.0)
@@ -741,7 +745,7 @@ def main() -> None:
                     open_positions = sum(1 for s in symbols if has_position[s] and held_qty[s] > 0)
                     if open_positions >= args.max_positions:
                         cycle_summary.append(
-                            f"{symbol} score={m.get('score', 0):.2f} cd={cooldown_left[symbol]} max_pos"
+                            f"{symbol} score={m.get('score', 0):.2f}{cross_info} cd={cooldown_left[symbol]} max_pos"
                         )
                         time.sleep(max(0, args.throttle_ms) / 1000.0)
                         continue
@@ -759,7 +763,7 @@ def main() -> None:
                     order_budget = min(per_slot_cap, capped_by_cash, remaining_investable)
                     if order_budget < args.min_order_krw:
                         cycle_summary.append(
-                            f"{symbol} score={m.get('score', 0):.2f} cd={cooldown_left[symbol]}"
+                            f"{symbol} score={m.get('score', 0):.2f}{cross_info} cd={cooldown_left[symbol]}"
                         )
                         time.sleep(max(0, args.throttle_ms) / 1000.0)
                         continue
@@ -775,7 +779,7 @@ def main() -> None:
                         total_buy = buy_cost + buy_fee
                     if qty <= 0:
                         cycle_summary.append(
-                            f"{symbol} score={m.get('score', 0):.2f} cd={cooldown_left[symbol]} qty=0"
+                            f"{symbol} score={m.get('score', 0):.2f}{cross_info} cd={cooldown_left[symbol]} qty=0"
                         )
                         time.sleep(max(0, args.throttle_ms) / 1000.0)
                         continue
@@ -831,7 +835,7 @@ def main() -> None:
                 elif signal == -1 and has_position[symbol]:
                     if held_bars[symbol] < args.min_hold_bars:
                         cycle_summary.append(
-                            f"{symbol} score={m.get('score', 0):.2f} "
+                            f"{symbol} score={m.get('score', 0):.2f}{cross_info} "
                             f"cd={cooldown_left[symbol]} h={held_bars[symbol]}/{args.min_hold_bars}"
                         )
                         time.sleep(max(0, args.throttle_ms) / 1000.0)
@@ -839,7 +843,7 @@ def main() -> None:
                     require_exit_confirm = args.exit_confirm_bars if args.strategy_mode == "multi_factor" else 1
                     if exit_streak[symbol] < require_exit_confirm:
                         cycle_summary.append(
-                            f"{symbol} score={m.get('score', 0):.2f} "
+                            f"{symbol} score={m.get('score', 0):.2f}{cross_info} "
                             f"cd={cooldown_left[symbol]} x={exit_streak[symbol]}/{require_exit_confirm}"
                         )
                         time.sleep(max(0, args.throttle_ms) / 1000.0)
@@ -901,7 +905,7 @@ def main() -> None:
                         save=True,
                     )
                 else:
-                    cycle_summary.append(f"{symbol} score={m.get('score', 0):.2f} cd={cooldown_left[symbol]}")
+                    cycle_summary.append(f"{symbol} score={m.get('score', 0):.2f}{cross_info} cd={cooldown_left[symbol]}")
 
                 time.sleep(max(0, args.throttle_ms) / 1000.0)
             if cycle_summary:
