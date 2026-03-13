@@ -15,7 +15,26 @@ from fetch_kis_daily import get_access_token
 
 
 VTS_BASE_URL = "https://openapivts.koreainvestment.com:29443"
-DEFENSE_SYMBOLS = ["012450", "079550", "047810", "272210", "064350"]
+DEFAULT_SYMBOLS = [
+    # Defense (5)
+    "012450",  # Hanwha Aerospace
+    "079550",  # LIG Nex1
+    "047810",  # KAI
+    "272210",  # Hanwha Systems
+    "064350",  # Hyundai Rotem
+    # Space (5)
+    "099320",  # Satrec Initiative
+    "211270",  # AP Satellite
+    "189300",  # Intellian Tech
+    "038870",  # ECOBIT? (legacy space-related supply chain placeholder)
+    "048770",  # TYM? (legacy placeholder)
+    # AI (5)
+    "035420",  # NAVER
+    "000660",  # SK hynix
+    "005930",  # Samsung Electronics
+    "377480",  # MAUM.AI
+    "108860",  # SELVAS AI
+]
 KST = ZoneInfo("Asia/Seoul")
 
 
@@ -53,7 +72,7 @@ def load_dotenv(dotenv_path: str = ".env") -> None:
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="KIS realtime paper trader (multi-factor)")
-    p.add_argument("--symbols", default=",".join(DEFENSE_SYMBOLS), help="comma-separated symbols")
+    p.add_argument("--symbols", default=",".join(DEFAULT_SYMBOLS), help="comma-separated symbols")
     p.add_argument("--interval-sec", type=int, default=30, help="main loop interval in seconds")
     p.add_argument("--bar-minutes", type=int, choices=[1, 3, 5], default=1, help="signal timeframe")
     p.add_argument("--after-close-action", choices=["wait", "exit"], default="wait", help="behavior after market close")
@@ -88,7 +107,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--min-hold-bars", type=int, default=8, help="minimum bars to hold before normal exit")
     p.add_argument("--fee-rate", type=float, default=0.0005, help="fee rate for sizing/pnl")
     p.add_argument("--paper-cash", type=float, default=10_000_000, help="fallback paper cash when balance inquiry fails")
-    p.add_argument("--position-size-pct", type=float, default=0.08, help="max position size as fraction of portfolio equity")
+    p.add_argument("--max-invested-pct", type=float, default=0.60, help="max total invested fraction of portfolio equity")
+    p.add_argument("--max-positions", type=int, default=3, help="max number of concurrent positions")
     p.add_argument("--min-order-krw", type=float, default=200_000, help="skip buy when target order value is below this amount")
     p.add_argument("--retry", type=int, default=3, help="quote retry count")
     p.add_argument("--throttle-ms", type=int, default=800, help="delay between symbols in milliseconds")
@@ -681,7 +701,7 @@ def main() -> None:
                     require_entry_confirm = args.entry_confirm_bars if args.strategy_mode == "multi_factor" else 1
                     if entry_streak[symbol] < require_entry_confirm:
                         cycle_summary.append(
-                            f"{symbol} px={last_px:.0f} score={m.get('score', 0):.2f} "
+                            f"{symbol} score={m.get('score', 0):.2f} "
                             f"cd={cooldown_left[symbol]} e={entry_streak[symbol]}/{require_entry_confirm}"
                         )
                         time.sleep(max(0, args.throttle_ms) / 1000.0)
@@ -715,6 +735,14 @@ def main() -> None:
                                 f"{orderable_cash:,.0f} KRW (fail_streak={cash_fail_streak})",
                                 save=True,
                             )
+                    open_positions = sum(1 for s in symbols if has_position[s] and held_qty[s] > 0)
+                    if open_positions >= args.max_positions:
+                        cycle_summary.append(
+                            f"{symbol} score={m.get('score', 0):.2f} cd={cooldown_left[symbol]} max_pos"
+                        )
+                        time.sleep(max(0, args.throttle_ms) / 1000.0)
+                        continue
+
                     mtm_positions = sum(
                         held_qty[s] * (last_price[s] if last_price[s] > 0 else entry_price[s])
                         for s in symbols
@@ -722,11 +750,14 @@ def main() -> None:
                     )
                     portfolio_equity_est = orderable_cash + mtm_positions
                     capped_by_equity = max(0.0, portfolio_equity_est * args.position_size_pct)
+                    per_slot_cap = max(0.0, portfolio_equity_est * args.max_invested_pct / max(1, args.max_positions))
                     capped_by_cash = max(0.0, orderable_cash * (1.0 - args.cash_buffer_pct))
-                    order_budget = min(capped_by_equity, capped_by_cash)
+                    invested_cap = max(0.0, portfolio_equity_est * args.max_invested_pct)
+                    remaining_investable = max(0.0, invested_cap - mtm_positions)
+                    order_budget = min(capped_by_equity, per_slot_cap, capped_by_cash, remaining_investable)
                     if order_budget < args.min_order_krw:
                         cycle_summary.append(
-                            f"{symbol} px={last_px:.0f} score={m.get('score', 0):.2f} cd={cooldown_left[symbol]}"
+                            f"{symbol} score={m.get('score', 0):.2f} cd={cooldown_left[symbol]}"
                         )
                         time.sleep(max(0, args.throttle_ms) / 1000.0)
                         continue
@@ -742,13 +773,13 @@ def main() -> None:
                         total_buy = buy_cost + buy_fee
                     if qty <= 0:
                         cycle_summary.append(
-                            f"{symbol} px={last_px:.0f} score={m.get('score', 0):.2f} cd={cooldown_left[symbol]} qty=0"
+                            f"{symbol} score={m.get('score', 0):.2f} cd={cooldown_left[symbol]} qty=0"
                         )
                         time.sleep(max(0, args.throttle_ms) / 1000.0)
                         continue
                     if args.dry_run:
                         emit(
-                            f"[{ts}] >>> BUY <<< {symbol} bar={bar_ts or '-'} px={last_px:.0f} qty={qty} "
+                            f"[{ts}] >>> BUY <<< {symbol} bar={bar_ts or '-'} qty={qty} "
                             f"score={m.get('score', 0):.2f} mom={m.get('mom', 0)*100:.2f}% "
                             f"k={m.get('k', 0):.1f} d={m.get('d', 0):.1f} "
                             f"cash={orderable_cash:.0f} budget={order_budget:.0f} fee={buy_fee:,.0f} (dry-run)",
@@ -798,7 +829,7 @@ def main() -> None:
                 elif signal == -1 and has_position[symbol]:
                     if held_bars[symbol] < args.min_hold_bars:
                         cycle_summary.append(
-                            f"{symbol} px={last_px:.0f} score={m.get('score', 0):.2f} "
+                            f"{symbol} score={m.get('score', 0):.2f} "
                             f"cd={cooldown_left[symbol]} h={held_bars[symbol]}/{args.min_hold_bars}"
                         )
                         time.sleep(max(0, args.throttle_ms) / 1000.0)
@@ -806,7 +837,7 @@ def main() -> None:
                     require_exit_confirm = args.exit_confirm_bars if args.strategy_mode == "multi_factor" else 1
                     if exit_streak[symbol] < require_exit_confirm:
                         cycle_summary.append(
-                            f"{symbol} px={last_px:.0f} score={m.get('score', 0):.2f} "
+                            f"{symbol} score={m.get('score', 0):.2f} "
                             f"cd={cooldown_left[symbol]} x={exit_streak[symbol]}/{require_exit_confirm}"
                         )
                         time.sleep(max(0, args.throttle_ms) / 1000.0)
@@ -820,7 +851,7 @@ def main() -> None:
                     pnl_pct = (trade_pnl_krw / entry_total_cost[symbol] * 100.0) if entry_total_cost[symbol] > 0 else 0.0
                     if args.dry_run:
                         emit(
-                            f"[{ts}] <<< SELL >>> {symbol} bar={bar_ts or '-'} px={last_px:.0f} qty={qty} "
+                            f"[{ts}] <<< SELL >>> {symbol} bar={bar_ts or '-'} qty={qty} "
                             f"pnl={pnl_pct:.2f}% ({trade_pnl_krw:,.0f} KRW) "
                             f"score={m.get('score', 0):.2f} fee={sell_fee:,.0f} (dry-run)",
                             save=True,
@@ -868,7 +899,7 @@ def main() -> None:
                         save=True,
                     )
                 else:
-                    cycle_summary.append(f"{symbol} px={last_px:.0f} score={m.get('score', 0):.2f} cd={cooldown_left[symbol]}")
+                    cycle_summary.append(f"{symbol} score={m.get('score', 0):.2f} cd={cooldown_left[symbol]}")
 
                 time.sleep(max(0, args.throttle_ms) / 1000.0)
             if cycle_summary:
