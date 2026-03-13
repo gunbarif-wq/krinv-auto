@@ -8,8 +8,9 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, List
 
+import requests
 from fetch_kis_daily import DEFAULT_BASE_URL, get_access_token
-from fetch_kis_minute import fetch_one_day_1m, iter_business_days
+from fetch_kis_minute import iter_business_days
 
 
 DEFAULT_SYMBOLS = [
@@ -52,8 +53,8 @@ def parse_args() -> argparse.Namespace:
         description="Fetch 1m data and prepare train/test backtest datasets in one run"
     )
     p.add_argument("--symbols", default=",".join(DEFAULT_SYMBOLS), help="comma-separated symbols")
-    p.add_argument("--business-days", type=int, default=15, help="number of business days to fetch")
-    p.add_argument("--include-today", action="store_true", help="include today's data")
+    p.add_argument("--business-days", type=int, default=60, help="number of business days to fetch")
+    p.add_argument("--include-today", action="store_true", default=True, help="include today's data")
     p.add_argument("--train-ratio", type=float, default=0.7, help="train split ratio by time")
     p.add_argument("--out-dir", default="data/backtest_sets", help="output root directory")
     p.add_argument("--max-bars-per-day", type=int, default=450)
@@ -79,6 +80,91 @@ def split_rows(rows: List[Dict[str, str]], train_ratio: float) -> tuple[List[Dic
     cut = int(len(rows) * ratio)
     cut = max(1, min(len(rows) - 1, cut))
     return rows[:cut], rows[cut:]
+
+
+def fetch_one_day_1m_10230(
+    app_key: str,
+    app_secret: str,
+    token: str,
+    base_url: str,
+    symbol: str,
+    yyyymmdd: str,
+    pause_ms: int = 500,
+    max_rows: int = 480,
+) -> List[Dict[str, str]]:
+    # 10230 is real-domain only.
+    if "openapivts" in base_url:
+        raise RuntimeError("10230 API is not supported on mock(VTS) domain. Use https://openapi.koreainvestment.com:9443")
+
+    url = f"{base_url}/uapi/domestic-stock/v1/quotations/inquire-time-dailychartprice"
+    out: Dict[str, Dict[str, str]] = {}
+    req_count = 0
+    cursor_time = "153000"
+    last_cursor = ""
+
+    while len(out) < max_rows:
+        headers = {
+            "content-type": "application/json; charset=utf-8",
+            "authorization": f"Bearer {token}",
+            "appkey": app_key,
+            "appsecret": app_secret,
+            "tr_id": "FHKST03010230",
+            "custtype": "P",
+        }
+
+        params = {
+            "FID_COND_MRKT_DIV_CODE": "J",
+            "FID_INPUT_ISCD": symbol,
+            "FID_INPUT_HOUR_1": cursor_time,
+            "FID_INPUT_DATE_1": yyyymmdd,
+            "FID_PW_DATA_INCU_YN": "Y",
+            "FID_FAKE_TICK_INCU_YN": "",
+        }
+        r = requests.get(url, headers=headers, params=params, timeout=20)
+        r.raise_for_status()
+        data = r.json()
+        if data.get("rt_cd") != "0":
+            raise RuntimeError(f"rt_cd={data.get('rt_cd')} msg1={data.get('msg1')}")
+
+        rows = data.get("output2", []) or []
+        if not rows:
+            break
+        min_time = None
+        for x in rows:
+            d = str(x.get("stck_bsop_date", "")).strip()
+            t = str(x.get("stck_cntg_hour", "")).strip()
+            if d != yyyymmdd or len(t) != 6:
+                continue
+            if min_time is None or t < min_time:
+                min_time = t
+            dt = f"{d[:4]}-{d[4:6]}-{d[6:8]} {t[:2]}:{t[2:4]}:{t[4:6]}"
+            out[dt] = {
+                "date": dt,
+                "open": str(x.get("stck_oprc", "0")),
+                "high": str(x.get("stck_hgpr", "0")),
+                "low": str(x.get("stck_lwpr", "0")),
+                "close": str(x.get("stck_prpr", "0")),
+                "volume": str(x.get("cntg_vol", "0")),
+            }
+
+        req_count += 1
+        if len(out) >= max_rows:
+            break
+        # Move cursor backward by oldest bar time from this response.
+        if not min_time:
+            break
+        # Prevent infinite loop when API keeps returning same tail chunk.
+        if min_time == last_cursor or min_time >= cursor_time:
+            break
+        last_cursor = cursor_time
+        cursor_time = min_time
+        if cursor_time <= "090000":
+            break
+        if req_count > 20:
+            break
+        time.sleep(max(0, pause_ms) / 1000.0)
+
+    return [out[k] for k in sorted(out.keys())]
 
 
 def main() -> None:
@@ -120,13 +206,13 @@ def main() -> None:
         for d in days:
             ymd = d.strftime("%Y%m%d")
             try:
-                rows = fetch_one_day_1m(
+                rows = fetch_one_day_1m_10230(
                     app_key=args.app_key,
                     app_secret=args.app_secret,
                     token=token,
                     symbol=sym,
                     yyyymmdd=ymd,
-                    max_bars_per_day=args.max_bars_per_day,
+                    max_rows=args.max_bars_per_day,
                     pause_ms=args.pause_ms,
                     base_url=args.base_url,
                 )

@@ -94,33 +94,35 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--stoch-smooth", type=int, default=3, help="stochastic D smoothing")
     p.add_argument("--entry-threshold", type=float, default=0.40, help="buy score threshold")
     p.add_argument("--exit-threshold", type=float, default=-0.28, help="sell score threshold")
-    p.add_argument("--ma-a", type=int, default=3, help="A moving-average window")
-    p.add_argument("--ma-b", type=int, default=10, help="B moving-average window")
-    p.add_argument("--cross-level-window", type=int, default=60, help="lookback bars for [0,1] normalization")
-    p.add_argument("--cross-buy-level", type=float, default=0.75, help="buy threshold for ma_cross_level")
-    p.add_argument("--cross-sell-level", type=float, default=0.25, help="sell threshold for ma_cross_level")
+    p.add_argument("--ma-a", type=int, default=6, help="A moving-average window")
+    p.add_argument("--ma-b", type=int, default=26, help="B moving-average window")
+    p.add_argument("--cross-level-window", type=int, default=120, help="lookback bars for [0,1] normalization")
+    p.add_argument("--cross-buy-level", type=float, default=0.93, help="buy threshold for ma_cross_level")
+    p.add_argument("--cross-sell-level", type=float, default=0.55, help="sell threshold for ma_cross_level")
 
     # Risk and execution
-    p.add_argument("--cash-buffer-pct", type=float, default=0.10, help="keep this cash ratio unused")
-    p.add_argument("--stop-loss-pct", type=float, default=0.012, help="stop-loss ratio")
+    p.add_argument("--cash-buffer-pct", type=float, default=0.12, help="keep this cash ratio unused")
+    p.add_argument("--stop-loss-pct", type=float, default=0.008, help="stop-loss ratio")
     p.add_argument("--take-profit-pct", type=float, default=0.020, help="take-profit ratio")
-    p.add_argument("--cooldown-bars", type=int, default=8, help="bars to wait after exit")
+    p.add_argument("--cooldown-bars", type=int, default=50, help="bars to wait after exit")
     p.add_argument("--entry-confirm-bars", type=int, default=4, help="consecutive buy signals required")
     p.add_argument("--exit-confirm-bars", type=int, default=4, help="consecutive sell signals required")
-    p.add_argument("--min-hold-bars", type=int, default=8, help="minimum bars to hold before normal exit")
+    p.add_argument("--min-hold-bars", type=int, default=3, help="minimum bars to hold before normal exit")
     p.add_argument("--fee-rate", type=float, default=0.0005, help="fee rate for sizing/pnl")
     p.add_argument("--paper-cash", type=float, default=10_000_000, help="fallback paper cash when balance inquiry fails")
-    p.add_argument("--max-invested-pct", type=float, default=0.60, help="max total invested fraction of portfolio equity")
-    p.add_argument("--max-positions", type=int, default=3, help="max number of concurrent positions")
-    p.add_argument("--min-order-krw", type=float, default=200_000, help="skip buy when target order value is below this amount")
+    p.add_argument("--max-invested-pct", type=float, default=0.30, help="max total invested fraction of portfolio equity")
+    p.add_argument("--max-positions", type=int, default=2, help="max number of concurrent positions")
+    p.add_argument("--min-order-krw", type=float, default=250_000, help="skip buy when target order value is below this amount")
     p.add_argument("--retry", type=int, default=3, help="quote retry count")
     p.add_argument("--throttle-ms", type=int, default=800, help="delay between symbols in milliseconds")
     p.add_argument(
         "--no-buy-before-close-min",
         type=int,
-        default=15,
+        default=25,
         help="block new buys during last N minutes before market close",
     )
+    p.add_argument("--no-buy-morning-start-hhmm", type=int, default=900, help="morning no-buy start (HHMM)")
+    p.add_argument("--no-buy-morning-end-hhmm", type=int, default=1000, help="morning no-buy end (HHMM, exclusive)")
     p.add_argument("--dry-run", action="store_true", help="print only, no order requests")
     p.add_argument("--log-file", default="logs/realtime_events.txt", help="important event log path")
     p.add_argument("--log-rotate-minutes", type=int, default=1440, help="create a new log file every N minutes")
@@ -755,6 +757,16 @@ def main() -> None:
                     continue
                 if bar_ts:
                     last_processed_bar[symbol] = bar_ts
+                ignore_close_window_signal = False
+                if bars:
+                    t = str(bars[-1].get("stck_cntg_hour", ""))
+                    if len(t) == 6:
+                        hhmm = int(t[:4])
+                        if 1520 <= hhmm <= 1529:
+                            ignore_close_window_signal = True
+                if ignore_close_window_signal:
+                    # Ignore noisy close-auction minutes (15:20~15:29) for strategy signals.
+                    signal = 0
 
                 st = rt.SymbolState(
                     has_position=has_position[symbol],
@@ -795,13 +807,21 @@ def main() -> None:
                     now_kst_symbol = datetime.now(KST)
                     hhmm_symbol = now_kst_symbol.hour * 100 + now_kst_symbol.minute
                     in_session_symbol = (now_kst_symbol.weekday() < 5) and (900 <= hhmm_symbol <= 1530)
+                    bar_hhmm = hhmm_symbol
+                    if bars:
+                        t_last = str(bars[-1].get("stck_cntg_hour", ""))
+                        if len(t_last) == 6:
+                            bar_hhmm = int(t_last[:4])
+                    morning_no_buy_window = (
+                        args.no_buy_morning_start_hhmm <= bar_hhmm < args.no_buy_morning_end_hhmm
+                    )
                     mins_to_close_symbol = (
                         now_kst_symbol.replace(hour=15, minute=30, second=0, microsecond=0) - now_kst_symbol
                     ).total_seconds() / 60.0
                     no_new_buy_window_symbol = in_session_symbol and (
                         0.0 <= mins_to_close_symbol <= max(0, args.no_buy_before_close_min)
                     )
-                    if (not in_session_symbol) or no_new_buy_window_symbol:
+                    if (not in_session_symbol) or no_new_buy_window_symbol or morning_no_buy_window:
                         cycle_summary.append(
                             f"{symbol} score={m.get('score', 0):.2f}{cross_info} cd={cooldown_left[symbol]} no_new_buy"
                         )
