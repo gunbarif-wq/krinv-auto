@@ -24,7 +24,7 @@ DEFAULT_SYMBOLS = [
     "272210",  # Hanwha Systems
     "064350",  # Hyundai Rotem
     "103140",  # Poongsan
-    "271940",  # Hanwha Ocean
+    "042660",  # Hanwha Ocean
 ]
 KST = ZoneInfo("Asia/Seoul")
 
