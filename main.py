@@ -724,6 +724,8 @@ def main() -> None:
                         entry_threshold=args.entry_threshold,
                         exit_threshold=args.exit_threshold,
                     )
+                buy_reason = "multi_factor_signal" if args.strategy_mode == "multi_factor" else "ma_cross_crossup_level"
+                sell_reason = "signal"
                 cross_info = ""
                 if args.strategy_mode == "ma_cross_level":
                     cross_info = f" gap={m.get('spread_pct', 0.0):+.2f}%"
@@ -750,10 +752,15 @@ def main() -> None:
                 if has_position[symbol] and entry_price[symbol] > 0:
                     held_bars[symbol] += 1
                     pnl_pct = (last_px / entry_price[symbol]) - 1.0
-                    if pnl_pct <= -args.stop_loss_pct or pnl_pct >= args.take_profit_pct:
+                    if pnl_pct <= -args.stop_loss_pct:
                         signal = -1
+                        sell_reason = "stop_loss"
+                    elif pnl_pct >= args.take_profit_pct:
+                        signal = -1
+                        sell_reason = "take_profit"
                     if hard_liquidation_window:
                         signal = -1
+                        sell_reason = "hard_close"
 
                 if signal == 1:
                     entry_streak[symbol] += 1
@@ -849,7 +856,8 @@ def main() -> None:
                             f"[{ts}] >>> BUY <<< {symbol} bar={bar_ts or '-'} qty={qty} "
                             f"score={m.get('score', 0):.2f} mom={m.get('mom', 0)*100:.2f}% "
                             f"k={m.get('k', 0):.1f} d={m.get('d', 0):.1f} "
-                            f"cash={orderable_cash:.0f} budget={order_budget:.0f} fee={buy_fee:,.0f} (dry-run)",
+                            f"cash={orderable_cash:.0f} budget={order_budget:.0f} fee={buy_fee:,.0f} "
+                            f"reason={buy_reason} (dry-run)",
                             save=True,
                         )
                     else:
@@ -866,7 +874,7 @@ def main() -> None:
                         )
                         emit(
                             f"[{ts}] >>> BUY <<< {symbol} bar={bar_ts or '-'} qty={qty} px={last_px:.0f} "
-                            f"order -> {res.get('msg1', '')} / rt_cd={res.get('rt_cd')}",
+                            f"reason={buy_reason} order -> {res.get('msg1', '')} / rt_cd={res.get('rt_cd')}",
                             save=True,
                         )
                     if qty > 0:
@@ -929,7 +937,7 @@ def main() -> None:
                         emit(
                             f"[{ts}] <<< SELL >>> {symbol} bar={bar_ts or '-'} qty={qty} "
                             f"pnl={pnl_pct:.2f}% ({trade_pnl_krw:,.0f} KRW) "
-                            f"score={m.get('score', 0):.2f} fee={sell_fee:,.0f} (dry-run)",
+                            f"score={m.get('score', 0):.2f} fee={sell_fee:,.0f} reason={sell_reason} (dry-run)",
                             save=True,
                         )
                     else:
@@ -946,7 +954,7 @@ def main() -> None:
                         )
                         emit(
                             f"[{ts}] <<< SELL >>> {symbol} bar={bar_ts or '-'} qty={qty} px={last_px:.0f} "
-                            f"order -> {res.get('msg1', '')} / rt_cd={res.get('rt_cd')}",
+                            f"reason={sell_reason} order -> {res.get('msg1', '')} / rt_cd={res.get('rt_cd')}",
                             save=True,
                         )
                     if args.dry_run:
@@ -986,7 +994,7 @@ def main() -> None:
                             emit(
                                 f"[{ts}] <<< SELL >>> {symbol} bar={bar_ts or '-'} qty={qty} "
                                 f"pnl={pnl_pct:.2f}% ({trade_pnl_krw:,.0f} KRW) "
-                                f"score={m.get('score', 0):.2f} fee={sell_fee:,.0f} (dry-run, hard_close)",
+                                f"score={m.get('score', 0):.2f} fee={sell_fee:,.0f} reason=hard_close (dry-run)",
                                 save=True,
                             )
                         else:
@@ -1003,7 +1011,7 @@ def main() -> None:
                             )
                             emit(
                                 f"[{ts}] <<< SELL >>> {symbol} bar={bar_ts or '-'} qty={qty} px={last_px:.0f} "
-                                f"order -> {res.get('msg1', '')} / rt_cd={res.get('rt_cd')} (hard_close)",
+                                f"reason=hard_close order -> {res.get('msg1', '')} / rt_cd={res.get('rt_cd')}",
                                 save=True,
                             )
                         if args.dry_run:
