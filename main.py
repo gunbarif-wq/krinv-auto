@@ -13,6 +13,7 @@ from typing import Dict, List
 import requests
 
 from fetch_kis_daily import get_access_token
+import strategy_runtime as rt
 
 
 VTS_BASE_URL = "https://openapivts.koreainvestment.com:29443"
@@ -551,7 +552,7 @@ def main() -> None:
     cash_fail_streak = 0
     base_log_path = Path(args.log_file)
     base_log_path.parent.mkdir(parents=True, exist_ok=True)
-    signal_need = required_bars_for_signal(args)
+    signal_need = rt.required_bars_for_signal(args)
     warmup_bars = max(1, math.ceil(args.startup_lookback_minutes / max(1, args.bar_minutes)))
     count_hint = max(signal_need + warmup_bars, signal_need + 5, 40)
 
@@ -705,7 +706,7 @@ def main() -> None:
                     emit(f"[{ts}] {symbol} no data")
                     continue
                 if args.strategy_mode == "ma_cross_level":
-                    signal, m = ma_cross_level_signal(
+                    signal, m = rt.ma_cross_level_signal(
                         ohlc=ohlc,
                         ma_a=args.ma_a,
                         ma_b=args.ma_b,
@@ -714,7 +715,7 @@ def main() -> None:
                         sell_level=args.cross_sell_level,
                     )
                 else:
-                    signal, m = multi_factor_signal(
+                    signal, m = rt.multi_factor_signal(
                         ohlc=ohlc,
                         short=args.short,
                         long=args.long,
@@ -744,40 +745,48 @@ def main() -> None:
                 if bar_ts:
                     last_processed_bar[symbol] = bar_ts
 
-                if cooldown_left[symbol] > 0:
-                    cooldown_left[symbol] -= 1
-                    if signal == 1:
-                        signal = 0
-
-                if has_position[symbol] and entry_price[symbol] > 0:
-                    held_bars[symbol] += 1
-                    pnl_pct = (last_px / entry_price[symbol]) - 1.0
-                    if pnl_pct <= -args.stop_loss_pct:
-                        signal = -1
-                        sell_reason = "stop_loss"
-                    elif pnl_pct >= args.take_profit_pct:
-                        signal = -1
-                        sell_reason = "take_profit"
-                    if hard_liquidation_window:
-                        signal = -1
-                        sell_reason = "hard_close"
-
-                if signal == 1:
-                    entry_streak[symbol] += 1
-                    exit_streak[symbol] = 0
-                elif signal == -1:
-                    exit_streak[symbol] += 1
-                    entry_streak[symbol] = 0
-                else:
-                    entry_streak[symbol] = 0
-                    exit_streak[symbol] = 0
+                st = rt.SymbolState(
+                    has_position=has_position[symbol],
+                    held_qty=held_qty[symbol],
+                    entry_price=entry_price[symbol],
+                    entry_total_cost=entry_total_cost[symbol],
+                    held_bars=held_bars[symbol],
+                    cooldown_left=cooldown_left[symbol],
+                    entry_streak=entry_streak[symbol],
+                    exit_streak=exit_streak[symbol],
+                )
+                transition = rt.evaluate_state_transition(
+                    state=st,
+                    signal=signal,
+                    last_px=last_px,
+                    strategy_mode=args.strategy_mode,
+                    stop_loss_pct=args.stop_loss_pct,
+                    take_profit_pct=args.take_profit_pct,
+                    entry_confirm_bars=args.entry_confirm_bars,
+                    exit_confirm_bars=args.exit_confirm_bars,
+                    min_hold_bars=args.min_hold_bars,
+                    hard_liquidation_window=hard_liquidation_window,
+                    ease_sell_window=ease_sell_window,
+                    ease_ratio=ease_ratio,
+                )
+                signal = int(transition["signal"])
+                sell_reason = str(transition["sell_reason"])
+                has_position[symbol] = st.has_position
+                held_qty[symbol] = st.held_qty
+                entry_price[symbol] = st.entry_price
+                entry_total_cost[symbol] = st.entry_total_cost
+                held_bars[symbol] = st.held_bars
+                cooldown_left[symbol] = st.cooldown_left
+                entry_streak[symbol] = st.entry_streak
+                exit_streak[symbol] = st.exit_streak
 
                 if signal == 1 and not has_position[symbol]:
-                    require_entry_confirm = args.entry_confirm_bars if args.strategy_mode == "multi_factor" else 1
-                    if entry_streak[symbol] < require_entry_confirm:
+                    entry_wait = transition.get("entry_wait")
+                    if entry_wait:
+                        cur, req = entry_wait
                         cycle_summary.append(
                             f"{symbol} score={m.get('score', 0):.2f}{cross_info} "
-                            f"cd={cooldown_left[symbol]} e={entry_streak[symbol]}/{require_entry_confirm}"
+                            f"cd={cooldown_left[symbol]} e={cur}/{req}"
                         )
                         time.sleep(max(0, args.throttle_ms) / 1000.0)
                         continue
@@ -902,27 +911,21 @@ def main() -> None:
                             save=True,
                         )
                 elif signal == -1 and has_position[symbol]:
-                    min_hold_req = args.min_hold_bars
-                    exit_confirm_req = args.exit_confirm_bars if args.strategy_mode == "multi_factor" else 1
-                    if ease_sell_window:
-                        min_hold_req = max(0, int(round(args.min_hold_bars * (1.0 - ease_ratio))))
-                        if args.strategy_mode == "multi_factor":
-                            exit_confirm_req = max(1, int(round(args.exit_confirm_bars * (1.0 - ease_ratio))))
-                    if hard_liquidation_window:
-                        min_hold_req = 0
-                        exit_confirm_req = 1
-
-                    if held_bars[symbol] < min_hold_req:
+                    hold_wait = transition.get("hold_wait")
+                    if hold_wait:
+                        cur, req = hold_wait
                         cycle_summary.append(
                             f"{symbol} score={m.get('score', 0):.2f}{cross_info} "
-                            f"cd={cooldown_left[symbol]} h={held_bars[symbol]}/{min_hold_req}"
+                            f"cd={cooldown_left[symbol]} h={cur}/{req}"
                         )
                         time.sleep(max(0, args.throttle_ms) / 1000.0)
                         continue
-                    if exit_streak[symbol] < exit_confirm_req:
+                    exit_wait = transition.get("exit_wait")
+                    if exit_wait:
+                        cur, req = exit_wait
                         cycle_summary.append(
                             f"{symbol} score={m.get('score', 0):.2f}{cross_info} "
-                            f"cd={cooldown_left[symbol]} x={exit_streak[symbol]}/{exit_confirm_req}"
+                            f"cd={cooldown_left[symbol]} x={cur}/{req}"
                         )
                         time.sleep(max(0, args.throttle_ms) / 1000.0)
                         continue

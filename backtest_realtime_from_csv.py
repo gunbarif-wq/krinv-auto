@@ -2,24 +2,11 @@ from __future__ import annotations
 
 import argparse
 import csv
-from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Tuple
 
-from main import ma_cross_level_signal, multi_factor_signal
-
-
-@dataclass
-class SymbolState:
-    has_position: bool = False
-    held_qty: int = 0
-    entry_price: float = 0.0
-    entry_total_cost: float = 0.0
-    held_bars: int = 0
-    cooldown_left: int = 0
-    entry_streak: int = 0
-    exit_streak: int = 0
+from strategy_runtime import SymbolState, evaluate_state_transition, ma_cross_level_signal, multi_factor_signal
 
 
 def parse_args() -> argparse.Namespace:
@@ -140,30 +127,24 @@ def main() -> None:
                     exit_threshold=args.exit_threshold,
                 )
 
-            if st.cooldown_left > 0:
-                st.cooldown_left -= 1
-                if signal == 1:
-                    signal = 0
-
-            if st.has_position and st.entry_price > 0:
-                st.held_bars += 1
-                pnl_pct_live = (last_px / st.entry_price) - 1.0
-                if pnl_pct_live <= -args.stop_loss_pct or pnl_pct_live >= args.take_profit_pct:
-                    signal = -1
-
-            if signal == 1:
-                st.entry_streak += 1
-                st.exit_streak = 0
-            elif signal == -1:
-                st.exit_streak += 1
-                st.entry_streak = 0
-            else:
-                st.entry_streak = 0
-                st.exit_streak = 0
+            transition = evaluate_state_transition(
+                state=st,
+                signal=signal,
+                last_px=last_px,
+                strategy_mode=args.strategy_mode,
+                stop_loss_pct=args.stop_loss_pct,
+                take_profit_pct=args.take_profit_pct,
+                entry_confirm_bars=args.entry_confirm_bars,
+                exit_confirm_bars=args.exit_confirm_bars,
+                min_hold_bars=args.min_hold_bars,
+                hard_liquidation_window=False,
+                ease_sell_window=False,
+                ease_ratio=0.0,
+            )
+            signal = int(transition["signal"])
 
             if signal == 1 and not st.has_position:
-                require_entry_confirm = args.entry_confirm_bars if args.strategy_mode == "multi_factor" else 1
-                if st.entry_streak < require_entry_confirm:
+                if transition.get("entry_wait"):
                     continue
 
                 mtm_positions = sum(
@@ -203,10 +184,9 @@ def main() -> None:
                 trades += 1
 
             elif signal == -1 and st.has_position:
-                if st.held_bars < args.min_hold_bars:
+                if transition.get("hold_wait"):
                     continue
-                require_exit_confirm = args.exit_confirm_bars if args.strategy_mode == "multi_factor" else 1
-                if st.exit_streak < require_exit_confirm:
+                if transition.get("exit_wait"):
                     continue
 
                 sell_gross = last_px * st.held_qty
