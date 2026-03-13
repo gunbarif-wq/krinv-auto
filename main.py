@@ -23,9 +23,13 @@ DEFAULT_SYMBOLS = [
     "079550",  # LIG Nex1
     "047810",  # KAI
     "272210",  # Hanwha Systems
-    "064350",  # Hyundai Rotem
     "103140",  # Poongsan
-    "042660",  # Hanwha Ocean
+    # Space (5)
+    "099320",  # SATREC INITIATIVE
+    "211270",  # AP Satellite
+    "274090",  # Kenko Aerospace
+    "214270",  # Genohco
+    "271940",  # ILJIN Hysolus (aerospace supply-chain proxy)
 ]
 KST = ZoneInfo("Asia/Seoul")
 
@@ -71,7 +75,7 @@ def load_dotenv(dotenv_path: str = ".env") -> None:
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="KIS realtime paper trader (multi-factor)")
     p.add_argument("--symbols", default=",".join(DEFAULT_SYMBOLS), help="comma-separated symbols")
-    p.add_argument("--interval-sec", type=int, default=30, help="main loop interval in seconds")
+    p.add_argument("--interval-sec", type=int, default=0, help="main loop interval in seconds")
     p.add_argument("--bar-minutes", type=int, choices=[1, 3, 5], default=1, help="signal timeframe")
     p.add_argument("--startup-lookback-minutes", type=int, default=25, help="extra warmup minutes for startup/immediate trading")
     p.add_argument("--after-close-action", choices=["wait", "exit"], default="wait", help="behavior after market close")

@@ -13,13 +13,18 @@ from fetch_kis_minute import fetch_one_day_1m, iter_business_days
 
 
 DEFAULT_SYMBOLS = [
+    # Defense (5)
     "012450",  # Hanwha Aerospace
     "079550",  # LIG Nex1
     "047810",  # KAI
     "272210",  # Hanwha Systems
-    "064350",  # Hyundai Rotem
     "103140",  # Poongsan
-    "042660",  # Hanwha Ocean
+    # Space (5)
+    "099320",  # SATREC INITIATIVE
+    "211270",  # AP Satellite
+    "274090",  # Kenko Aerospace
+    "214270",  # Genohco
+    "271940",  # ILJIN Hysolus (aerospace supply-chain proxy)
 ]
 
 
