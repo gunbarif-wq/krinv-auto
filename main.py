@@ -657,6 +657,15 @@ def main() -> None:
             hhmm = now_kst.hour * 100 + now_kst.minute
             is_weekday = now_kst.weekday() < 5
             in_session = is_weekday and (900 <= hhmm <= 1530)
+            close_dt = now_kst.replace(hour=15, minute=30, second=0, microsecond=0)
+            mins_to_close = (close_dt - now_kst).total_seconds() / 60.0
+            ease_sell_window = is_weekday and in_session and (3.0 < mins_to_close <= 30.0)
+            hard_liquidation_window = is_weekday and in_session and (0.0 <= mins_to_close <= 3.0)
+            # 0.0 at 30min left -> 1.0 at 3min left
+            ease_ratio = 0.0
+            if ease_sell_window:
+                ease_ratio = (30.0 - mins_to_close) / 27.0
+                ease_ratio = max(0.0, min(1.0, ease_ratio))
             if not in_session:
                 if args.after_close_action == "exit":
                     emit(f"[{datetime.now().strftime('%H:%M:%S')}] market closed (KST) -> exit", save=True)
@@ -736,6 +745,8 @@ def main() -> None:
                     held_bars[symbol] += 1
                     pnl_pct = (last_px / entry_price[symbol]) - 1.0
                     if pnl_pct <= -args.stop_loss_pct or pnl_pct >= args.take_profit_pct:
+                        signal = -1
+                    if hard_liquidation_window:
                         signal = -1
 
                 if signal == 1:
@@ -877,18 +888,27 @@ def main() -> None:
                             save=True,
                         )
                 elif signal == -1 and has_position[symbol]:
-                    if held_bars[symbol] < args.min_hold_bars:
+                    min_hold_req = args.min_hold_bars
+                    exit_confirm_req = args.exit_confirm_bars if args.strategy_mode == "multi_factor" else 1
+                    if ease_sell_window:
+                        min_hold_req = max(0, int(round(args.min_hold_bars * (1.0 - ease_ratio))))
+                        if args.strategy_mode == "multi_factor":
+                            exit_confirm_req = max(1, int(round(args.exit_confirm_bars * (1.0 - ease_ratio))))
+                    if hard_liquidation_window:
+                        min_hold_req = 0
+                        exit_confirm_req = 1
+
+                    if held_bars[symbol] < min_hold_req:
                         cycle_summary.append(
                             f"{symbol} score={m.get('score', 0):.2f}{cross_info} "
-                            f"cd={cooldown_left[symbol]} h={held_bars[symbol]}/{args.min_hold_bars}"
+                            f"cd={cooldown_left[symbol]} h={held_bars[symbol]}/{min_hold_req}"
                         )
                         time.sleep(max(0, args.throttle_ms) / 1000.0)
                         continue
-                    require_exit_confirm = args.exit_confirm_bars if args.strategy_mode == "multi_factor" else 1
-                    if exit_streak[symbol] < require_exit_confirm:
+                    if exit_streak[symbol] < exit_confirm_req:
                         cycle_summary.append(
                             f"{symbol} score={m.get('score', 0):.2f}{cross_info} "
-                            f"cd={cooldown_left[symbol]} x={exit_streak[symbol]}/{require_exit_confirm}"
+                            f"cd={cooldown_left[symbol]} x={exit_streak[symbol]}/{exit_confirm_req}"
                         )
                         time.sleep(max(0, args.throttle_ms) / 1000.0)
                         continue
@@ -949,7 +969,64 @@ def main() -> None:
                         save=True,
                     )
                 else:
-                    cycle_summary.append(f"{symbol} score={m.get('score', 0):.2f}{cross_info} cd={cooldown_left[symbol]}")
+                    if hard_liquidation_window and has_position[symbol]:
+                        qty = held_qty[symbol]
+                        sell_gross = last_px * qty
+                        sell_fee = sell_gross * args.fee_rate
+                        sell_net = sell_gross - sell_fee
+                        trade_pnl_krw = sell_net - entry_total_cost[symbol]
+                        pnl_pct = (trade_pnl_krw / entry_total_cost[symbol] * 100.0) if entry_total_cost[symbol] > 0 else 0.0
+                        if args.dry_run:
+                            emit(
+                                f"[{ts}] <<< SELL >>> {symbol} bar={bar_ts or '-'} qty={qty} "
+                                f"pnl={pnl_pct:.2f}% ({trade_pnl_krw:,.0f} KRW) "
+                                f"score={m.get('score', 0):.2f} fee={sell_fee:,.0f} (dry-run, hard_close)",
+                                save=True,
+                            )
+                        else:
+                            res = place_order(
+                                base_url=args.base_url,
+                                token=token,
+                                app_key=args.app_key,
+                                app_secret=args.app_secret,
+                                cano=args.cano,
+                                acnt_prdt_cd=args.acnt_prdt_cd,
+                                symbol=symbol,
+                                qty=qty,
+                                side="sell",
+                            )
+                            emit(
+                                f"[{ts}] <<< SELL >>> {symbol} bar={bar_ts or '-'} order -> "
+                                f"{res.get('msg1', '')} / rt_cd={res.get('rt_cd')} (hard_close)",
+                                save=True,
+                            )
+                        if args.dry_run:
+                            paper_cash += sell_net
+                        else:
+                            if predicted_cash is None:
+                                predicted_cash = 0.0
+                            predicted_cash += sell_net
+                        realized_pnl_krw[symbol] += trade_pnl_krw
+                        has_position[symbol] = False
+                        held_qty[symbol] = 0
+                        entry_price[symbol] = 0.0
+                        entry_total_cost[symbol] = 0.0
+                        held_bars[symbol] = 0
+                        exit_streak[symbol] = 0
+                        cooldown_left[symbol] = args.cooldown_bars
+                        total_realized = sum(realized_pnl_krw.values())
+                        total_unrealized = sum(
+                            (last_price[s] - entry_price[s]) * held_qty[s]
+                            for s in symbols
+                            if has_position[s] and entry_price[s] > 0 and held_qty[s] > 0
+                        )
+                        emit(
+                            f"[{ts}] portfolio realized={total_realized:,.0f} KRW "
+                            f"unrealized={total_unrealized:,.0f} KRW",
+                            save=True,
+                        )
+                    else:
+                        cycle_summary.append(f"{symbol} score={m.get('score', 0):.2f}{cross_info} cd={cooldown_left[symbol]}")
 
                 time.sleep(max(0, args.throttle_ms) / 1000.0)
             if cycle_summary:
