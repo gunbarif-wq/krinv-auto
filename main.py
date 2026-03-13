@@ -619,7 +619,37 @@ def main() -> None:
                 emit("initial_positions=NONE", save=True)
         except Exception as e:
             emit(f"initial_orderable_cash=ERROR ({str(e)[:200]})", save=True)
-            raise RuntimeError("initial cash inquiry failed in live mode")
+            # Keep running in live mode with a conservative fallback when balance API is unstable.
+            last_known_cash = float(args.paper_cash)
+            predicted_cash = float(args.paper_cash)
+            emit(f"initial_orderable_cash_fallback={args.paper_cash:,.0f} KRW", save=True)
+            try:
+                positions = get_positions(
+                    base_url=args.base_url,
+                    token=token,
+                    app_key=args.app_key,
+                    app_secret=args.app_secret,
+                    cano=args.cano,
+                    acnt_prdt_cd=args.acnt_prdt_cd,
+                )
+                synced = []
+                for s in symbols:
+                    pos = positions.get(s)
+                    if not pos:
+                        continue
+                    qty = int(pos["qty"])
+                    avg = float(pos["avg_price"])
+                    has_position[s] = True
+                    held_qty[s] = qty
+                    entry_price[s] = avg
+                    entry_total_cost[s] = qty * avg * (1.0 + args.fee_rate)
+                    synced.append(f"{s}:{qty}@{avg:.0f}")
+                if synced:
+                    emit("initial_positions=" + ",".join(synced), save=True)
+                else:
+                    emit("initial_positions=NONE", save=True)
+            except Exception as pos_e:
+                emit(f"initial_positions=UNKNOWN ({str(pos_e)[:120]})", save=True)
 
     while True:
         try:
