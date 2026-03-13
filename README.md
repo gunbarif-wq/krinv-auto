@@ -25,7 +25,7 @@
 OCI Code Editor 기준:
 
 1. 우측 상단 `Code Editor` 열기
-2. 터미널 열기 (`Ctrl + \``)
+2. 터미널 열기 (Ctrl + ~)
 3. GitHub SSH 키 생성/등록
 4. SSH로 프로젝트 클론 및 설치
 
