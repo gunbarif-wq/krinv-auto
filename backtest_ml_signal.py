@@ -15,7 +15,7 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Backtest ML signal on prepared feature dataset")
     p.add_argument("--dataset-csv", default="data/ml/047810/047810_full_ml.csv")
     p.add_argument("--model-path", default="data/ml/047810/047810_model.pkl")
-    p.add_argument("--threshold", type=float, default=0.96, help="override model threshold")
+    p.add_argument("--threshold", type=float, default=0.60, help="override model threshold")
     p.add_argument("--fee-roundtrip", type=float, default=0.0004, help="override model fee")
     p.add_argument("--hold-bars", type=int, default=16, help="non-overlap holding bars")
     p.add_argument("--entry-start-hhmm", type=int, default=900)
@@ -25,7 +25,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--loss-streak-for-cooldown", type=int, default=0, help="activate cooldown after N consecutive losses")
     p.add_argument("--cooldown-bars", type=int, default=0, help="cooldown bars after loss streak trigger")
     p.add_argument("--take-profit-pct", type=float, default=0.020)
-    p.add_argument("--stop-loss-pct", type=float, default=0.006)
+    p.add_argument("--stop-loss-pct", type=float, default=0.005)
     p.add_argument("--trailing-stop-pct", type=float, default=0.004)
     p.add_argument("--max-concurrent-positions", type=int, default=1)
     p.add_argument("--position-size-pct", type=float, default=0.25)
@@ -305,7 +305,7 @@ def main() -> None:
 
     model = bundle["model"]
     feature_cols: List[str] = bundle["feature_columns"]
-    threshold = float(args.threshold if args.threshold is not None else bundle.get("threshold", 0.96))
+    threshold = float(args.threshold if args.threshold is not None else bundle.get("threshold", 0.60))
     fee = float(args.fee_roundtrip if args.fee_roundtrip is not None else bundle.get("fee_roundtrip", 0.0004))
 
     X, close, dates = load_dataset(Path(args.dataset_csv), feature_cols)

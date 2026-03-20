@@ -7,9 +7,7 @@ import pickle
 from pathlib import Path
 from typing import Dict, List, Tuple
 
-import matplotlib.pyplot as plt
 import numpy as np
-from matplotlib.lines import Line2D
 
 from backtest_ml_signal import PolicyConfig, run_policy
 from build_ml_dataset import build_rows, load_split
@@ -18,10 +16,10 @@ from build_ml_dataset import build_rows, load_split
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Visualize ML trades on price chart")
     p.add_argument("--raw-csv", default="data/backtest_sets_047810_5y/full_1m/047810_1m_full.csv")
+    p.add_argument("--feature-csv", default="", help="prebuilt ML feature csv (date,close,feature...,label,fwd_close_ret)")
     p.add_argument("--price-csv", default="", help="OHLCV csv for candlestick (default: --raw-csv)")
     p.add_argument("--model-path", default="data/ml/047810/047810_model.pkl")
-    p.add_argument("--output-png", default="data/ml/047810/047810_trade_plot.png")
-    p.add_argument("--interactive-html", default="", help="if set, save interactive Plotly HTML")
+    p.add_argument("--interactive-html", default="data/ml/047810/047810_trade_plot_full.html")
     p.add_argument("--horizon-bars", type=int, default=30)
     p.add_argument("--label-mode", default="fixed", choices=["fixed", "atr"])
     p.add_argument("--up-threshold", type=float, default=0.012)
@@ -29,15 +27,15 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--atr-up-mult", type=float, default=2.0)
     p.add_argument("--atr-down-mult", type=float, default=1.2)
     p.add_argument("--atr-floor-pct", type=float, default=0.003)
-    p.add_argument("--threshold", type=float, default=0.96)
+    p.add_argument("--threshold", type=float, default=0.60)
     p.add_argument("--fee-roundtrip", type=float, default=0.0004)
     p.add_argument("--indicator-cols", default="rsi14,momentum_20", help="comma separated feature columns to plot below price")
     p.add_argument("--indicator-mode", default="local_rank01", choices=["raw01", "local_rank01"])
     p.add_argument("--indicator-window", type=int, default=120, help="window for local_rank01")
-    p.add_argument("--score-threshold", type=float, default=0.96, help="0..1 threshold line on indicator panel")
+    p.add_argument("--score-threshold", type=float, default=0.60, help="0..1 threshold line on indicator panel")
     p.add_argument("--hold-bars", type=int, default=16)
     p.add_argument("--take-profit-pct", type=float, default=0.020)
-    p.add_argument("--stop-loss-pct", type=float, default=0.006)
+    p.add_argument("--stop-loss-pct", type=float, default=0.005)
     p.add_argument("--trailing-stop-pct", type=float, default=0.004)
     p.add_argument("--max-concurrent-positions", type=int, default=1)
     p.add_argument("--position-size-pct", type=float, default=0.25)
@@ -72,6 +70,16 @@ def rows_to_arrays(rows: List[Dict[str, str]], feature_cols: List[str]) -> Tuple
         raise RuntimeError("empty rows after raw->feature build")
     extra_np = {k: np.asarray(v, dtype=float) for k, v in extra_cols.items()}
     return np.asarray(x, dtype=float), np.asarray(close, dtype=float), dates, extra_np
+
+
+def load_feature_rows(path: Path) -> List[Dict[str, str]]:
+    rows: List[Dict[str, str]] = []
+    with path.open("r", encoding="utf-8") as f:
+        for r in csv.DictReader(f):
+            rows.append(r)
+    if not rows:
+        raise RuntimeError(f"empty feature csv: {path}")
+    return rows
 
 
 def load_price_ohlc(path: Path) -> Dict[str, Tuple[float, float, float, float]]:
@@ -133,17 +141,20 @@ def main() -> None:
     threshold = float(args.threshold if args.threshold is not None else bundle.get("threshold", 0.7))
     fee = float(args.fee_roundtrip if args.fee_roundtrip is not None else bundle.get("fee_roundtrip", 0.001))
 
-    raw = load_split(Path(args.raw_csv))
-    rows = build_rows(
-        data=raw,
-        horizon=args.horizon_bars,
-        label_mode=args.label_mode,
-        up_threshold=args.up_threshold,
-        down_threshold=args.down_threshold,
-        atr_up_mult=args.atr_up_mult,
-        atr_down_mult=args.atr_down_mult,
-        atr_floor_pct=args.atr_floor_pct,
-    )
+    if str(args.feature_csv).strip():
+        rows = load_feature_rows(Path(args.feature_csv))
+    else:
+        raw = load_split(Path(args.raw_csv))
+        rows = build_rows(
+            data=raw,
+            horizon=args.horizon_bars,
+            label_mode=args.label_mode,
+            up_threshold=args.up_threshold,
+            down_threshold=args.down_threshold,
+            atr_up_mult=args.atr_up_mult,
+            atr_down_mult=args.atr_down_mult,
+            atr_floor_pct=args.atr_floor_pct,
+        )
     x, close, dates, feature_series = rows_to_arrays(rows, feature_cols)
     prob = model.predict_proba(x)[:, 1]  # type: ignore[attr-defined]
     cfg = PolicyConfig(
@@ -173,212 +184,154 @@ def main() -> None:
 
     indicator_cols = [c.strip() for c in str(args.indicator_cols).split(",") if c.strip()]
     indicator_cols = [c for c in indicator_cols if c in feature_series]
-    fig, axes = plt.subplots(
-        nrows=2,
-        ncols=1,
-        figsize=(14, 9),
-        sharex=True,
-        gridspec_kw={"height_ratios": [3, 2]},
-    )
-    ax_price, ax_ind = axes
-    ax_price.plot(np.arange(close_ds.shape[0]), close_ds, linewidth=1.0, label="close")
-
-    if trade_logs:
-        entry_i = np.asarray([int(t["entry_i"]) for t in trade_logs], dtype=int)
-        exit_i = np.asarray([int(t["exit_i"]) for t in trade_logs], dtype=int)
-        entry_y = close[entry_i]
-        exit_y = close[exit_i]
-        entry_x = entry_i // step
-        exit_x = exit_i // step
-        for x in entry_x:
-            ax_price.axvline(x=int(x), color="#2ca02c", linewidth=0.8, alpha=0.55)
-        for x in exit_x:
-            ax_price.axvline(x=int(x), color="#d62728", linewidth=0.8, alpha=0.55)
 
     title = (
         f"ret={float(result['total_return_pct']):.2f}% "
         f"mdd={float(result['max_drawdown_pct']):.2f}% "
         f"trades={int(result['trades'])} win={float(result['win_rate_pct']):.1f}%"
     )
-    ax_price.set_title(title)
-    ax_price.set_ylabel("price")
-    ax_price.legend(
-        handles=[
-            Line2D([0], [0], color="#1f77b4", lw=1.2, label="close"),
-            Line2D([0], [0], color="#2ca02c", lw=1.0, label="buy"),
-            Line2D([0], [0], color="#d62728", lw=1.0, label="sell"),
-        ],
-        loc="upper left",
-    )
 
     prob_ds = prob[idx]
     prob_norm = normalize_indicator(prob_ds, args.indicator_mode, args.indicator_window)
-    ax_ind.plot(np.arange(prob_norm.shape[0]), prob_norm, linewidth=1.0, label="model_score")
-    ax_ind.axhline(
-        y=float(np.clip(args.score_threshold, 0.0, 1.0)),
-        color="#ff7f0e",
-        linestyle="--",
-        linewidth=1.0,
-        label=f"threshold={float(np.clip(args.score_threshold,0.0,1.0)):.2f}",
+    try:
+        import plotly.graph_objects as go
+        from plotly.subplots import make_subplots
+    except Exception as e:
+        raise RuntimeError(f"plotly import failed: {e}")
+
+    ohlc_map: Dict[str, Tuple[float, float, float, float]] = {}
+    price_csv = str(args.price_csv).strip() or (str(args.raw_csv) if not str(args.feature_csv).strip() else "")
+    if price_csv:
+        ohlc_map = load_price_ohlc(Path(price_csv))
+    x_all = [dates[i] for i in idx]
+    has_candle = bool(ohlc_map)
+    if has_candle:
+        o_vals: List[float] = []
+        h_vals: List[float] = []
+        l_vals: List[float] = []
+        c_vals: List[float] = []
+        valid_x: List[str] = []
+        for dt in x_all:
+            if dt not in ohlc_map:
+                continue
+            o, h, l, c = ohlc_map[dt]
+            valid_x.append(dt)
+            o_vals.append(o)
+            h_vals.append(h)
+            l_vals.append(l)
+            c_vals.append(c)
+        x_price = valid_x
+    else:
+        x_price = x_all
+
+    pfig = make_subplots(
+        rows=2,
+        cols=1,
+        shared_xaxes=True,
+        vertical_spacing=0.06,
+        row_heights=[0.62, 0.38],
+        subplot_titles=("Price + Trades", "Model/Indicators"),
+    )
+    if has_candle:
+        pfig.add_trace(
+            go.Candlestick(
+                x=x_price,
+                open=o_vals,
+                high=h_vals,
+                low=l_vals,
+                close=c_vals,
+                name="candles",
+            ),
+            row=1,
+            col=1,
+        )
+    else:
+        pfig.add_trace(
+            go.Scatter(
+                x=x_all,
+                y=close_ds,
+                mode="lines",
+                name="close",
+                line=dict(width=1.2),
+            ),
+            row=1,
+            col=1,
+        )
+    if trade_logs:
+        entry_i = np.asarray([int(t["entry_i"]) for t in trade_logs], dtype=int)
+        exit_i = np.asarray([int(t["exit_i"]) for t in trade_logs], dtype=int)
+        entry_x = entry_i // step
+        exit_x = exit_i // step
+        entry_dt = [dates[min(i * step, len(dates) - 1)] for i in entry_x]
+        exit_dt = [dates[min(i * step, len(dates) - 1)] for i in exit_x]
+        for xdt in entry_dt:
+            pfig.add_vline(x=xdt, line_width=1, line_color="#2ca02c", opacity=0.5, row=1, col=1)
+        for xdt in exit_dt:
+            pfig.add_vline(x=xdt, line_width=1, line_color="#d62728", opacity=0.5, row=1, col=1)
+        pfig.add_trace(
+            go.Scatter(x=[None], y=[None], mode="lines", name="buy", line=dict(color="#2ca02c", width=1)),
+            row=1,
+            col=1,
+        )
+        pfig.add_trace(
+            go.Scatter(x=[None], y=[None], mode="lines", name="sell", line=dict(color="#d62728", width=1)),
+            row=1,
+            col=1,
+        )
+
+    pfig.add_trace(
+        go.Scatter(
+            x=x_all,
+            y=prob_norm,
+            mode="lines",
+            name="model_score",
+            line=dict(width=1.2),
+        ),
+        row=2,
+        col=1,
+    )
+    pfig.add_trace(
+        go.Scatter(
+            x=x_all,
+            y=np.full(prob_ds.shape[0], float(np.clip(args.score_threshold, 0.0, 1.0)), dtype=float),
+            mode="lines",
+            name=f"threshold={float(np.clip(args.score_threshold,0.0,1.0)):.2f}",
+            line=dict(width=1.0, dash="dash"),
+        ),
+        row=2,
+        col=1,
     )
     for c in indicator_cols:
         vals = feature_series[c][idx]
-        vals_norm = normalize_indicator(vals, args.indicator_mode, args.indicator_window)
-        ax_ind.plot(np.arange(vals_norm.shape[0]), vals_norm, linewidth=0.9, alpha=0.9, label=c)
-    ax_ind.set_xlabel("bar index (downsampled)")
-    ax_ind.set_ylabel("indicators")
-    ax_ind.set_ylim(0.0, 1.0)
-    ax_ind.legend(loc="upper left", ncol=2)
-    fig.tight_layout()
-
-    out = Path(args.output_png)
-    out.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(out, dpi=150)
-    plt.close(fig)
-
-    if str(args.interactive_html).strip():
-        try:
-            import plotly.graph_objects as go
-            from plotly.subplots import make_subplots
-        except Exception as e:
-            raise RuntimeError(f"plotly import failed: {e}")
-
-        ohlc_map: Dict[str, Tuple[float, float, float, float]] = {}
-        price_csv = str(args.price_csv).strip() or str(args.raw_csv)
-        if price_csv:
-            ohlc_map = load_price_ohlc(Path(price_csv))
-        x_all = [dates[i] for i in idx]
-        has_candle = bool(ohlc_map)
-        if has_candle:
-            o_vals: List[float] = []
-            h_vals: List[float] = []
-            l_vals: List[float] = []
-            c_vals: List[float] = []
-            valid_x: List[str] = []
-            for dt in x_all:
-                if dt not in ohlc_map:
-                    continue
-                o, h, l, c = ohlc_map[dt]
-                valid_x.append(dt)
-                o_vals.append(o)
-                h_vals.append(h)
-                l_vals.append(l)
-                c_vals.append(c)
-            x_price = valid_x
-        else:
-            x_price = x_all
-
-        pfig = make_subplots(
-            rows=2,
-            cols=1,
-            shared_xaxes=True,
-            vertical_spacing=0.06,
-            row_heights=[0.62, 0.38],
-            subplot_titles=("Price + Trades", "Model/Indicators"),
-        )
-        if has_candle:
-            pfig.add_trace(
-                go.Candlestick(
-                    x=x_price,
-                    open=o_vals,
-                    high=h_vals,
-                    low=l_vals,
-                    close=c_vals,
-                    name="candles",
-                ),
-                row=1,
-                col=1,
-            )
-        else:
-            pfig.add_trace(
-                go.Scatter(
-                    x=x_all,
-                    y=close_ds,
-                    mode="lines",
-                    name="close",
-                    line=dict(width=1.2),
-                ),
-                row=1,
-                col=1,
-            )
-        if trade_logs:
-            entry_i = np.asarray([int(t["entry_i"]) for t in trade_logs], dtype=int)
-            exit_i = np.asarray([int(t["exit_i"]) for t in trade_logs], dtype=int)
-            entry_x = entry_i // step
-            exit_x = exit_i // step
-            entry_dt = [dates[min(i * step, len(dates) - 1)] for i in entry_x]
-            exit_dt = [dates[min(i * step, len(dates) - 1)] for i in exit_x]
-            for xdt in entry_dt:
-                pfig.add_vline(x=xdt, line_width=1, line_color="#2ca02c", opacity=0.5, row=1, col=1)
-            for xdt in exit_dt:
-                pfig.add_vline(x=xdt, line_width=1, line_color="#d62728", opacity=0.5, row=1, col=1)
-            # legend proxies
-            pfig.add_trace(
-                go.Scatter(x=[None], y=[None], mode="lines", name="buy", line=dict(color="#2ca02c", width=1)),
-                row=1,
-                col=1,
-            )
-            pfig.add_trace(
-                go.Scatter(x=[None], y=[None], mode="lines", name="sell", line=dict(color="#d62728", width=1)),
-                row=1,
-                col=1,
-            )
-
+        vals = normalize_indicator(vals, args.indicator_mode, args.indicator_window)
         pfig.add_trace(
             go.Scatter(
                 x=x_all,
-                y=prob_norm,
+                y=vals,
                 mode="lines",
-                name="model_score",
-                line=dict(width=1.2),
+                name=c,
+                line=dict(width=1.0),
+                opacity=0.9,
             ),
             row=2,
             col=1,
         )
-        pfig.add_trace(
-            go.Scatter(
-                x=x_all,
-                y=np.full(prob_ds.shape[0], float(np.clip(args.score_threshold, 0.0, 1.0)), dtype=float),
-                mode="lines",
-                name=f"threshold={float(np.clip(args.score_threshold,0.0,1.0)):.2f}",
-                line=dict(width=1.0, dash="dash"),
-            ),
-            row=2,
-            col=1,
-        )
-        for c in indicator_cols:
-            vals = feature_series[c][idx]
-            vals = normalize_indicator(vals, args.indicator_mode, args.indicator_window)
-            pfig.add_trace(
-                go.Scatter(
-                    x=x_all,
-                    y=vals,
-                    mode="lines",
-                    name=c,
-                    line=dict(width=1.0),
-                    opacity=0.9,
-                ),
-                row=2,
-                col=1,
-            )
-        pfig.update_layout(
-            title=title,
-            template="plotly_white",
-            height=860,
-            legend=dict(orientation="h"),
-            xaxis_rangeslider_visible=False,
-        )
-        pfig.update_xaxes(title_text="datetime", row=2, col=1)
-        pfig.update_yaxes(title_text="price", row=1, col=1)
-        pfig.update_yaxes(title_text="indicators", row=2, col=1)
-        pfig.update_yaxes(range=[0.0, 1.0], row=2, col=1)
+    pfig.update_layout(
+        title=title,
+        template="plotly_white",
+        height=860,
+        legend=dict(orientation="h"),
+        xaxis_rangeslider_visible=False,
+    )
+    pfig.update_xaxes(title_text="datetime", row=2, col=1)
+    pfig.update_yaxes(title_text="price", row=1, col=1)
+    pfig.update_yaxes(title_text="indicators", row=2, col=1)
+    pfig.update_yaxes(range=[0.0, 1.0], row=2, col=1)
 
-        html_out = Path(args.interactive_html)
-        html_out.parent.mkdir(parents=True, exist_ok=True)
-        pfig.write_html(str(html_out), include_plotlyjs="cdn")
-        print(f"interactive_saved={html_out}")
-
-    print(f"plot_saved={out}")
+    html_out = Path(args.interactive_html)
+    html_out.parent.mkdir(parents=True, exist_ok=True)
+    pfig.write_html(str(html_out), include_plotlyjs="cdn")
+    print(f"interactive_saved={html_out}")
     print(
         f"return={float(result['total_return_pct']):.2f}% trades={int(result['trades'])} "
         f"win_rate={float(result['win_rate_pct']):.2f}% mdd={float(result['max_drawdown_pct']):.2f}%"

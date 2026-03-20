@@ -88,7 +88,7 @@ def parse_args() -> argparse.Namespace:
 
     # ML signal parameters
     p.add_argument("--ml-model-path", default="data/ml/047810/047810_model.pkl", help="trained ML model bundle path")
-    p.add_argument("--ml-threshold", type=float, default=0.96, help="entry threshold for ML alpha/prob score")
+    p.add_argument("--ml-threshold", type=float, default=0.60, help="entry threshold for ML alpha/prob score")
     p.add_argument("--ml-signal-mode", choices=["alpha", "prob"], default="alpha", help="ml signal score mode")
     p.add_argument("--ml-alpha-ret-scale", type=float, default=0.004, help="sigmoid scale for expected return in alpha mode")
     p.add_argument("--ml-alpha-rank-window", type=int, default=180, help="rolling rank window for alpha mode")
@@ -99,7 +99,7 @@ def parse_args() -> argparse.Namespace:
 
     # Risk and execution
     p.add_argument("--cash-buffer-pct", type=float, default=0.10, help="keep this cash ratio unused")
-    p.add_argument("--stop-loss-pct", type=float, default=0.006, help="stop-loss ratio")
+    p.add_argument("--stop-loss-pct", type=float, default=0.005, help="stop-loss ratio")
     p.add_argument("--take-profit-pct", type=float, default=0.020, help="take-profit ratio")
     p.add_argument("--fee-rate", type=float, default=0.0005, help="fee rate for sizing/pnl")
     p.add_argument("--paper-cash", type=float, default=10_000_000, help="fallback paper cash when balance inquiry fails")
