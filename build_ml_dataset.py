@@ -37,6 +37,8 @@ FEATURE_COLUMNS = [
     "ma_gap_5_20",
     "ma_gap_10_20",
     "ma_gap_20_60",
+    "macd_plus",
+    "slow_k14_3",
     "price_z20",
     "price_z60",
     "momentum_20",
@@ -47,6 +49,14 @@ FEATURE_COLUMNS = [
     "day_range_pos",
     "vwap_gap_day",
     "minute_norm",
+]
+
+TRIO_FEATURE_COLUMNS = [
+    "ma_gap_5_20",
+    "ma_gap_10_20",
+    "ma_gap_20_60",
+    "macd_plus",
+    "slow_k14_3",
 ]
 
 
@@ -92,6 +102,49 @@ def safe_div(num: np.ndarray, den: np.ndarray) -> np.ndarray:
     out = np.full(num.shape[0], np.nan, dtype=float)
     ok = np.isfinite(den) & (np.abs(den) > 1e-12)
     out[ok] = num[ok] / den[ok]
+    return out
+
+
+def ema_vec(arr: np.ndarray, window: int) -> np.ndarray:
+    out = np.full(arr.shape[0], np.nan, dtype=float)
+    if window <= 0 or arr.shape[0] == 0:
+        return out
+    alpha = 2.0 / (window + 1.0)
+    out[0] = arr[0]
+    for i in range(1, arr.shape[0]):
+        out[i] = alpha * arr[i] + (1.0 - alpha) * out[i - 1]
+    return out
+
+
+def rolling_min(arr: np.ndarray, window: int) -> np.ndarray:
+    out = np.full(arr.shape[0], np.nan, dtype=float)
+    if window <= 0 or arr.shape[0] < window:
+        return out
+    for i in range(window - 1, arr.shape[0]):
+        out[i] = float(np.min(arr[i - window + 1 : i + 1]))
+    return out
+
+
+def rolling_max(arr: np.ndarray, window: int) -> np.ndarray:
+    out = np.full(arr.shape[0], np.nan, dtype=float)
+    if window <= 0 or arr.shape[0] < window:
+        return out
+    for i in range(window - 1, arr.shape[0]):
+        out[i] = float(np.max(arr[i - window + 1 : i + 1]))
+    return out
+
+
+def rolling_minmax01(arr: np.ndarray, window: int) -> np.ndarray:
+    out = np.full(arr.shape[0], np.nan, dtype=float)
+    if window <= 1 or arr.shape[0] < window:
+        return out
+    lo = rolling_min(arr, window)
+    hi = rolling_max(arr, window)
+    den = hi - lo
+    ok = np.isfinite(arr) & np.isfinite(lo) & np.isfinite(hi) & (den > 1e-12)
+    out[ok] = (arr[ok] - lo[ok]) / den[ok]
+    flat = np.isfinite(arr) & np.isfinite(lo) & np.isfinite(hi) & (den <= 1e-12)
+    out[flat] = 0.5
     return out
 
 
@@ -257,6 +310,19 @@ def build_rows(
     ma_gap_5_20 = safe_div(ma5 - ma20, ma20)
     ma_gap_10_20 = safe_div(ma10 - ma20, ma20)
     ma_gap_20_60 = safe_div(ma20 - ma60, ma60)
+    ema12 = ema_vec(c, 12)
+    ema26 = ema_vec(c, 26)
+    macd_line = ema12 - ema26
+    macd_signal = ema_vec(macd_line, 9)
+    macd_hist = macd_line - macd_signal
+    macd_plus = rolling_minmax01(macd_hist, 120)
+    ll14 = rolling_min(l, 14)
+    hh14 = rolling_max(h, 14)
+    fast_k14 = np.full(n, 0.5, dtype=float)
+    den_k14 = hh14 - ll14
+    ok_k14 = np.isfinite(c) & np.isfinite(ll14) & np.isfinite(hh14) & (den_k14 > 1e-12)
+    fast_k14[ok_k14] = (c[ok_k14] - ll14[ok_k14]) / den_k14[ok_k14]
+    slow_k14_3 = rolling_mean(fast_k14, 3)
     close_std20 = rolling_std(c, 20)
     close_std60 = rolling_std(c, 60)
     price_z20 = safe_div(c - ma20, close_std20)
@@ -308,6 +374,8 @@ def build_rows(
                 ma_gap_5_20[i],
                 ma_gap_10_20[i],
                 ma_gap_20_60[i],
+                macd_plus[i],
+                slow_k14_3[i],
                 price_z20[i],
                 price_z60[i],
                 momentum_20[i],

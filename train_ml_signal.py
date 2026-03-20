@@ -13,7 +13,7 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import average_precision_score, precision_score, recall_score, roc_auc_score
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
-from build_ml_dataset import build_rows, load_split as load_raw_split
+from build_ml_dataset import TRIO_FEATURE_COLUMNS, build_rows, load_split as load_raw_split
 
 
 def parse_args() -> argparse.Namespace:
@@ -31,6 +31,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--atr-floor-pct", type=float, default=0.003)
     p.add_argument("--symbol", default="047810")
     p.add_argument("--model-kind", default="logistic", choices=["logistic", "gboost"])
+    p.add_argument("--feature-mode", default="trio", choices=["all", "trio"])
     p.add_argument("--fee-roundtrip", type=float, default=0.001)
     p.add_argument("--min-trades", type=int, default=20)
     p.add_argument("--thr-start", type=float, default=0.50)
@@ -88,6 +89,16 @@ def rows_to_arrays(rows: List[Dict[str, str]], feature_columns: List[str]) -> Tu
     if not X:
         raise RuntimeError("empty rows")
     return np.asarray(X, dtype=float), np.asarray(y, dtype=int), np.asarray(fwd, dtype=float)
+
+
+def select_feature_columns(feature_columns: List[str], feature_mode: str) -> List[str]:
+    if feature_mode == "all":
+        return feature_columns
+    selected = [c for c in TRIO_FEATURE_COLUMNS if c in feature_columns]
+    if len(selected) != len(TRIO_FEATURE_COLUMNS):
+        missing = [c for c in TRIO_FEATURE_COLUMNS if c not in feature_columns]
+        raise RuntimeError(f"missing trio features in dataset: {missing}")
+    return selected
 
 
 def class_weights(y: np.ndarray) -> np.ndarray:
@@ -226,6 +237,7 @@ def main() -> None:
         val_rows = rows_all[cut1:cut2]
         test_rows = rows_all[cut2:]
         feature_columns = feature_columns_from_rows(rows_all)
+        feature_columns = select_feature_columns(feature_columns, args.feature_mode)
         X_train, y_train, f_train = rows_to_arrays(train_rows, feature_columns)
         X_val, y_val, f_val = rows_to_arrays(val_rows, feature_columns)
         X_test, y_test, f_test = rows_to_arrays(test_rows, feature_columns)
@@ -236,6 +248,7 @@ def main() -> None:
         test_path = root / f"{args.symbol}_test_ml.csv"
 
         feature_columns = infer_feature_columns(train_path)
+        feature_columns = select_feature_columns(feature_columns, args.feature_mode)
         if not feature_columns:
             raise RuntimeError(f"no feature columns inferred from {train_path}")
 

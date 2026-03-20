@@ -16,20 +16,23 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--dataset-csv", default="data/ml/047810/047810_full_ml.csv")
     p.add_argument("--model-path", default="data/ml/047810/047810_model.pkl")
     p.add_argument("--threshold", type=float, default=0.80, help="override model threshold")
-    p.add_argument("--fee-roundtrip", type=float, default=0.0004, help="override model fee")
-    p.add_argument("--hold-bars", type=int, default=16, help="non-overlap holding bars")
+    p.add_argument("--fee-roundtrip", type=float, default=0.001, help="override model fee")
+    p.add_argument("--hold-bars", type=int, default=20, help="non-overlap holding bars")
     p.add_argument("--entry-start-hhmm", type=int, default=900)
     p.add_argument("--entry-end-hhmm", type=int, default=1530)
     p.add_argument("--skip-open-min", type=int, default=0, help="skip first N minutes after 09:00")
-    p.add_argument("--skip-close-min", type=int, default=0, help="skip last N minutes before 15:30")
-    p.add_argument("--loss-streak-for-cooldown", type=int, default=0, help="activate cooldown after N consecutive losses")
-    p.add_argument("--cooldown-bars", type=int, default=0, help="cooldown bars after loss streak trigger")
-    p.add_argument("--take-profit-pct", type=float, default=0.020)
-    p.add_argument("--stop-loss-pct", type=float, default=0.005)
-    p.add_argument("--trailing-stop-pct", type=float, default=0.004)
+    p.add_argument("--skip-close-min", type=int, default=10, help="skip last N minutes before 15:30")
+    p.add_argument("--loss-streak-for-cooldown", type=int, default=1, help="activate cooldown after N consecutive losses")
+    p.add_argument("--cooldown-bars", type=int, default=30, help="cooldown bars after loss streak trigger")
+    p.add_argument("--take-profit-pct", type=float, default=0.0)
+    p.add_argument("--stop-loss-pct", type=float, default=0.0)
+    p.add_argument("--trailing-stop-pct", type=float, default=0.0)
     p.add_argument("--max-concurrent-positions", type=int, default=1)
-    p.add_argument("--position-size-pct", type=float, default=0.25)
-    p.add_argument("--min-entry-gap-bars", type=int, default=2)
+    p.add_argument("--position-size-pct", type=float, default=1.0)
+    p.add_argument("--min-entry-gap-bars", type=int, default=1)
+    p.add_argument("--no-benchmark-simple", action="store_true", help="disable indicator-only benchmarks")
+    p.add_argument("--bench-rsi-buy-max", type=float, default=0.15, help="RSI-only benchmark entry: rsi14 <= this")
+    p.add_argument("--bench-mom-buy-min", type=float, default=0.02, help="Momentum-only benchmark entry: momentum_20 >= this")
     p.add_argument("--initial-cash", type=float, default=10_000_000)
     p.add_argument("--report-out", default="data/ml/047810/047810_test_backtest.json")
     return p.parse_args()
@@ -329,6 +332,48 @@ def main() -> None:
         min_entry_gap_bars=max(1, int(args.min_entry_gap_bars)),
     )
     result = run_policy(prob=prob, close=close, dates=dates, cfg=cfg, initial_cash=float(args.initial_cash))
+    bench_rsi_result: Dict[str, float | int | str | None] | None = None
+    bench_mom_result: Dict[str, float | int | str | None] | None = None
+    if not args.no_benchmark_simple:
+        try:
+            rsi_idx = feature_cols.index("rsi14")
+            mom_idx = feature_cols.index("momentum_20")
+            bench_cfg = PolicyConfig(
+                threshold=0.5,
+                fee_roundtrip=cfg.fee_roundtrip,
+                hold_bars=cfg.hold_bars,
+                entry_start_hhmm=cfg.entry_start_hhmm,
+                entry_end_hhmm=cfg.entry_end_hhmm,
+                skip_open_min=cfg.skip_open_min,
+                skip_close_min=cfg.skip_close_min,
+                loss_streak_for_cooldown=cfg.loss_streak_for_cooldown,
+                cooldown_bars=cfg.cooldown_bars,
+                take_profit_pct=cfg.take_profit_pct,
+                stop_loss_pct=cfg.stop_loss_pct,
+                trailing_stop_pct=cfg.trailing_stop_pct,
+                max_concurrent_positions=cfg.max_concurrent_positions,
+                position_size_pct=cfg.position_size_pct,
+                min_entry_gap_bars=cfg.min_entry_gap_bars,
+            )
+            bench_prob_rsi = np.where(X[:, rsi_idx] <= float(args.bench_rsi_buy_max), 1.0, 0.0)
+            bench_prob_mom = np.where(X[:, mom_idx] >= float(args.bench_mom_buy_min), 1.0, 0.0)
+            bench_rsi_result = run_policy(
+                prob=bench_prob_rsi,
+                close=close,
+                dates=dates,
+                cfg=bench_cfg,
+                initial_cash=float(args.initial_cash),
+            )
+            bench_mom_result = run_policy(
+                prob=bench_prob_mom,
+                close=close,
+                dates=dates,
+                cfg=bench_cfg,
+                initial_cash=float(args.initial_cash),
+            )
+        except ValueError:
+            bench_rsi_result = None
+            bench_mom_result = None
 
     report = {
         "dataset_csv": str(args.dataset_csv),
@@ -349,6 +394,16 @@ def main() -> None:
         "position_size_pct": cfg.position_size_pct,
         "min_entry_gap_bars": cfg.min_entry_gap_bars,
         "initial_cash": args.initial_cash,
+        "benchmark_rsi_only": (
+            {"entry_rule": f"rsi14<={float(args.bench_rsi_buy_max):.4f}", **bench_rsi_result}
+            if bench_rsi_result is not None
+            else None
+        ),
+        "benchmark_momentum_only": (
+            {"entry_rule": f"momentum_20>={float(args.bench_mom_buy_min):.6f}", **bench_mom_result}
+            if bench_mom_result is not None
+            else None
+        ),
         **result,
     }
 
@@ -362,6 +417,22 @@ def main() -> None:
         f"win_rate={report['win_rate_pct']:.2f}% avg_trade={report['avg_trade_return_pct']:.4f}% "
         f"mdd={report['max_drawdown_pct']:.2f}%"
     )
+    if bench_rsi_result is not None:
+        print(
+            f"benchmark_rsi_only: return={float(bench_rsi_result['total_return_pct']):.2f}% "
+            f"trades={int(bench_rsi_result['trades'])} "
+            f"win_rate={float(bench_rsi_result['win_rate_pct']):.2f}% "
+            f"avg_trade={float(bench_rsi_result['avg_trade_return_pct']):.4f}% "
+            f"mdd={float(bench_rsi_result['max_drawdown_pct']):.2f}%"
+        )
+    if bench_mom_result is not None:
+        print(
+            f"benchmark_momentum_only: return={float(bench_mom_result['total_return_pct']):.2f}% "
+            f"trades={int(bench_mom_result['trades'])} "
+            f"win_rate={float(bench_mom_result['win_rate_pct']):.2f}% "
+            f"avg_trade={float(bench_mom_result['avg_trade_return_pct']):.4f}% "
+            f"mdd={float(bench_mom_result['max_drawdown_pct']):.2f}%"
+        )
 
 
 if __name__ == "__main__":
