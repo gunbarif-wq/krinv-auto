@@ -16,11 +16,11 @@ from build_ml_dataset import build_rows, load_split
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Visualize ML trades on price chart")
-    p.add_argument("--raw-csv", default="data/backtest_sets_047810_5y/full_1m/047810_1m_full.csv")
+    p.add_argument("--raw-csv", default="data/backtest_sets_225190_1y/full_1m/225190_1m_full.csv")
     p.add_argument("--feature-csv", default="", help="prebuilt ML feature csv (date,close,feature...,label,fwd_close_ret)")
     p.add_argument("--price-csv", default="", help="OHLCV csv for candlestick (default: --raw-csv)")
-    p.add_argument("--model-path", default="data/ml/047810/047810_model.pkl")
-    p.add_argument("--interactive-html", default="data/ml/047810/047810_trade_plot_full.html")
+    p.add_argument("--model-path", default="data/ml/225190/225190_model.pkl")
+    p.add_argument("--interactive-html", default="data/ml/225190/225190_trade_plot_full.html")
     p.add_argument("--horizon-bars", type=int, default=30)
     p.add_argument("--label-mode", default="fixed", choices=["fixed", "atr"])
     p.add_argument("--up-threshold", type=float, default=0.012)
@@ -29,7 +29,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--atr-down-mult", type=float, default=1.2)
     p.add_argument("--atr-floor-pct", type=float, default=0.003)
     p.add_argument("--threshold", type=float, default=0.80)
-    p.add_argument("--fee-roundtrip", type=float, default=0.0004)
+    p.add_argument("--fee-roundtrip", type=float, default=0.004)
     p.add_argument(
         "--indicator-cols",
         default="macd_plus,slow_k14_3",

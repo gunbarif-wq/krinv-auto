@@ -18,7 +18,7 @@ from build_ml_dataset import TRIO_FEATURE_COLUMNS, build_rows, load_split as loa
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Train ML signal model and choose threshold on validation set")
-    p.add_argument("--dataset-dir", default="data/ml/047810")
+    p.add_argument("--dataset-dir", default="data/ml/225190")
     p.add_argument("--raw-csv", default="", help="if set, build train/val/test from raw 1m csv directly")
     p.add_argument("--train-ratio", type=float, default=0.70)
     p.add_argument("--val-ratio", type=float, default=0.15)
@@ -29,16 +29,16 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--atr-up-mult", type=float, default=2.0)
     p.add_argument("--atr-down-mult", type=float, default=1.2)
     p.add_argument("--atr-floor-pct", type=float, default=0.003)
-    p.add_argument("--symbol", default="047810")
+    p.add_argument("--symbol", default="225190")
     p.add_argument("--model-kind", default="logistic", choices=["logistic", "gboost"])
     p.add_argument("--feature-mode", default="trio", choices=["all", "trio"])
-    p.add_argument("--fee-roundtrip", type=float, default=0.001)
+    p.add_argument("--fee-roundtrip", type=float, default=0.004)
     p.add_argument("--min-trades", type=int, default=20)
     p.add_argument("--thr-start", type=float, default=0.50)
     p.add_argument("--thr-end", type=float, default=0.95)
     p.add_argument("--thr-step", type=float, default=0.01)
-    p.add_argument("--model-out", default="data/ml/047810/047810_model.pkl")
-    p.add_argument("--report-out", default="data/ml/047810/047810_train_report.json")
+    p.add_argument("--model-out", default="data/ml/225190/225190_model.pkl")
+    p.add_argument("--report-out", default="data/ml/225190/225190_train_report.json")
     return p.parse_args()
 
 

@@ -13,10 +13,10 @@ import numpy as np
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Backtest ML signal on prepared feature dataset")
-    p.add_argument("--dataset-csv", default="data/ml/047810/047810_full_ml.csv")
-    p.add_argument("--model-path", default="data/ml/047810/047810_model.pkl")
+    p.add_argument("--dataset-csv", default="data/ml/225190/225190_full_ml.csv")
+    p.add_argument("--model-path", default="data/ml/225190/225190_model.pkl")
     p.add_argument("--threshold", type=float, default=0.80, help="override model threshold")
-    p.add_argument("--fee-roundtrip", type=float, default=0.001, help="override model fee")
+    p.add_argument("--fee-roundtrip", type=float, default=0.004, help="override model fee")
     p.add_argument("--hold-bars", type=int, default=20, help="non-overlap holding bars")
     p.add_argument("--entry-start-hhmm", type=int, default=900)
     p.add_argument("--entry-end-hhmm", type=int, default=1530)
@@ -34,7 +34,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--bench-rsi-buy-max", type=float, default=0.15, help="RSI-only benchmark entry: rsi14 <= this")
     p.add_argument("--bench-mom-buy-min", type=float, default=0.02, help="Momentum-only benchmark entry: momentum_20 >= this")
     p.add_argument("--initial-cash", type=float, default=10_000_000)
-    p.add_argument("--report-out", default="data/ml/047810/047810_test_backtest.json")
+    p.add_argument("--report-out", default="data/ml/225190/225190_test_backtest.json")
     return p.parse_args()
 
 

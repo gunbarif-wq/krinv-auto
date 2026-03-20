@@ -62,8 +62,8 @@ TRIO_FEATURE_COLUMNS = [
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Build ML dataset (features + labels) from 1m OHLCV CSV splits")
-    p.add_argument("--data-root", default="data/backtest_sets_047810_5y")
-    p.add_argument("--symbol", default="047810")
+    p.add_argument("--data-root", default="data/backtest_sets_225190_1y")
+    p.add_argument("--symbol", default="225190")
     p.add_argument("--horizon-bars", type=int, default=30)
     p.add_argument("--label-mode", default="fixed", choices=["fixed", "atr"])
     p.add_argument("--up-threshold", type=float, default=0.012)

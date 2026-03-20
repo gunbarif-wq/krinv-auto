@@ -16,10 +16,10 @@ from backtest_ml_signal import PolicyConfig, run_policy
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Auto-optimize ML policy parameters on validation set")
-    p.add_argument("--model-path", default="data/ml/047810/047810_model.pkl")
-    p.add_argument("--val-csv", default="data/ml/047810/047810_val_ml.csv")
-    p.add_argument("--test-csv", default="data/ml/047810/047810_test_ml.csv")
-    p.add_argument("--symbol", default="047810")
+    p.add_argument("--model-path", default="data/ml/225190/225190_model.pkl")
+    p.add_argument("--val-csv", default="data/ml/225190/225190_val_ml.csv")
+    p.add_argument("--test-csv", default="data/ml/225190/225190_test_ml.csv")
+    p.add_argument("--symbol", default="225190")
     p.add_argument("--initial-cash", type=float, default=10_000_000)
     p.add_argument("--mdd-penalty", type=float, default=0.12, help="score = return_pct - penalty*abs(mdd_pct)")
     p.add_argument("--min-trades", type=int, default=30)
@@ -34,7 +34,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--cooldown-grid", default="0,30,60")
     p.add_argument("--entry-start-hhmm", type=int, default=900)
     p.add_argument("--entry-end-hhmm", type=int, default=1530)
-    p.add_argument("--report-out", default="data/ml/047810/047810_policy_opt_report.json")
+    p.add_argument("--report-out", default="data/ml/225190/225190_policy_opt_report.json")
     return p.parse_args()
 
 
