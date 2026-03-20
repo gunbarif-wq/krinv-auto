@@ -50,12 +50,13 @@ def load_dotenv(dotenv_path: str = ".env") -> None:
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description="Fetch 1m data and prepare train/test backtest datasets in one run"
+        description="Fetch 1m data and prepare train/val/test backtest datasets in one run"
     )
     p.add_argument("--symbols", default=",".join(DEFAULT_SYMBOLS), help="comma-separated symbols")
-    p.add_argument("--business-days", type=int, default=60, help="number of business days to fetch")
+    p.add_argument("--business-days", type=int, default=2000, help="number of business days to fetch")
     p.add_argument("--include-today", action="store_true", default=True, help="include today's data")
     p.add_argument("--train-ratio", type=float, default=0.7, help="train split ratio by time")
+    p.add_argument("--val-ratio", type=float, default=0.15, help="validation split ratio by time")
     p.add_argument("--out-dir", default="data/backtest_sets", help="output root directory")
     p.add_argument("--max-bars-per-day", type=int, default=450)
     p.add_argument("--pause-ms", type=int, default=500)
@@ -73,13 +74,47 @@ def save_csv(path: Path, rows: List[Dict[str, str]]) -> None:
         w.writerows(rows)
 
 
-def split_rows(rows: List[Dict[str, str]], train_ratio: float) -> tuple[List[Dict[str, str]], List[Dict[str, str]]]:
+def split_rows(
+    rows: List[Dict[str, str]], train_ratio: float, val_ratio: float
+) -> tuple[List[Dict[str, str]], List[Dict[str, str]], List[Dict[str, str]]]:
     if not rows:
-        return [], []
-    ratio = max(0.1, min(0.9, train_ratio))
-    cut = int(len(rows) * ratio)
-    cut = max(1, min(len(rows) - 1, cut))
-    return rows[:cut], rows[cut:]
+        return [], [], []
+
+    n = len(rows)
+    train_r = max(0.05, min(0.95, train_ratio))
+    val_r = max(0.0, min(0.90, val_ratio))
+    if train_r + val_r >= 0.98:
+        val_r = max(0.0, 0.98 - train_r)
+
+    if n == 1:
+        return rows, [], []
+
+    train_n = max(1, int(round(n * train_r)))
+    val_n = int(round(n * val_r))
+    test_n = n - train_n - val_n
+
+    # Keep at least one row for test when possible.
+    if test_n < 1:
+        deficit = 1 - test_n
+        take = min(val_n, deficit)
+        val_n -= take
+        deficit -= take
+        if deficit > 0:
+            train_n = max(1, train_n - deficit)
+        test_n = n - train_n - val_n
+
+    # Keep indices in range in edge cases.
+    if train_n + val_n > n - 1:
+        overflow = train_n + val_n - (n - 1)
+        take = min(val_n, overflow)
+        val_n -= take
+        overflow -= take
+        if overflow > 0:
+            train_n = max(1, train_n - overflow)
+
+    cut1 = max(1, min(n, train_n))
+    cut2 = max(cut1, min(n, cut1 + max(0, val_n)))
+    return rows[:cut1], rows[cut1:cut2], rows[cut2:]
 
 
 def fetch_one_day_1m_10230(
@@ -192,6 +227,7 @@ def main() -> None:
     token = get_access_token(args.app_key, args.app_secret, base_url=args.base_url)
     root = Path(args.out_dir)
     train_dir = root / "train_1m"
+    val_dir = root / "val_1m"
     test_dir = root / "test_1m"
     merged_dir = root / "full_1m"
 
@@ -225,14 +261,16 @@ def main() -> None:
         rows_all = [merged[k] for k in sorted(merged.keys())]
         if len(rows_all) < 200:
             print(f"[WARN] {sym} low rows={len(rows_all)} (may be insufficient)")
-        train_rows, test_rows = split_rows(rows_all, args.train_ratio)
+        train_rows, val_rows, test_rows = split_rows(rows_all, args.train_ratio, args.val_ratio)
 
         save_csv(merged_dir / f"{sym}_1m_full.csv", rows_all)
         save_csv(train_dir / f"{sym}_1m_train.csv", train_rows)
+        save_csv(val_dir / f"{sym}_1m_val.csv", val_rows)
         save_csv(test_dir / f"{sym}_1m_test.csv", test_rows)
         print(
-            f"{sym}: full={len(rows_all)} train={len(train_rows)} test={len(test_rows)} "
-            f"train_end={train_rows[-1]['date'] if train_rows else '-'}"
+            f"{sym}: full={len(rows_all)} train={len(train_rows)} val={len(val_rows)} test={len(test_rows)} "
+            f"train_end={train_rows[-1]['date'] if train_rows else '-'} "
+            f"val_end={val_rows[-1]['date'] if val_rows else '-'}"
         )
 
     print("done")

@@ -5,15 +5,17 @@ import json
 import os
 import time
 import math
+import pickle
 from pathlib import Path
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
-from typing import Dict, List
+from typing import Dict, List, Any
 
 import requests
+import numpy as np
 
 from fetch_kis_daily import get_access_token
-import strategy_runtime as rt
+from build_ml_dataset import build_rows
 
 
 VTS_BASE_URL = "https://openapivts.koreainvestment.com:29443"
@@ -48,9 +50,7 @@ def seconds_until_next_open(now_kst: datetime) -> int:
 
 
 def required_bars_for_signal(args: argparse.Namespace) -> int:
-    if args.strategy_mode == "ma_cross_level":
-        return max(max(args.ma_a, args.ma_b) + 1, args.cross_level_window)
-    return max(args.long, args.mom_window + 1, args.stoch_window + args.stoch_smooth)
+    return max(80, int(args.ml_feature_warmup_bars))
 
 
 def load_dotenv(dotenv_path: str = ".env") -> None:
@@ -73,57 +73,50 @@ def load_dotenv(dotenv_path: str = ".env") -> None:
 
 
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="KIS realtime paper trader (multi-factor)")
-    p.add_argument("--symbols", default=",".join(DEFAULT_SYMBOLS), help="comma-separated symbols")
+    p = argparse.ArgumentParser(description="KIS realtime paper trader (ML-only)")
+    p.add_argument("--symbols", default="047810", help="comma-separated symbols")
     p.add_argument("--interval-sec", type=int, default=0, help="main loop interval in seconds")
     p.add_argument("--bar-minutes", type=int, choices=[1, 3, 5], default=1, help="signal timeframe")
     p.add_argument("--startup-lookback-minutes", type=int, default=25, help="extra warmup minutes for startup/immediate trading")
     p.add_argument("--after-close-action", choices=["wait", "exit"], default="wait", help="behavior after market close")
     p.add_argument(
         "--strategy-mode",
-        choices=["multi_factor", "ma_cross_level"],
-        default="ma_cross_level",
+        choices=["ml_alpha"],
+        default="ml_alpha",
         help="signal strategy mode",
     )
 
-    # Signal parameters
-    p.add_argument("--short", type=int, default=5, help="short SMA window")
-    p.add_argument("--long", type=int, default=20, help="long SMA window")
-    p.add_argument("--mom-window", type=int, default=12, help="momentum window")
-    p.add_argument("--stoch-window", type=int, default=14, help="stochastic K window")
-    p.add_argument("--stoch-smooth", type=int, default=3, help="stochastic D smoothing")
-    p.add_argument("--entry-threshold", type=float, default=0.40, help="buy score threshold")
-    p.add_argument("--exit-threshold", type=float, default=-0.28, help="sell score threshold")
-    p.add_argument("--ma-a", type=int, default=6, help="A moving-average window")
-    p.add_argument("--ma-b", type=int, default=26, help="B moving-average window")
-    p.add_argument("--cross-level-window", type=int, default=120, help="lookback bars for [0,1] normalization")
-    p.add_argument("--cross-buy-level", type=float, default=0.93, help="buy threshold for ma_cross_level")
-    p.add_argument("--cross-sell-level", type=float, default=0.55, help="sell threshold for ma_cross_level")
+    # ML signal parameters
+    p.add_argument("--ml-model-path", default="data/ml/047810/047810_model.pkl", help="trained ML model bundle path")
+    p.add_argument("--ml-threshold", type=float, default=0.96, help="entry threshold for ML alpha/prob score")
+    p.add_argument("--ml-signal-mode", choices=["alpha", "prob"], default="alpha", help="ml signal score mode")
+    p.add_argument("--ml-alpha-ret-scale", type=float, default=0.004, help="sigmoid scale for expected return in alpha mode")
+    p.add_argument("--ml-alpha-rank-window", type=int, default=180, help="rolling rank window for alpha mode")
+    p.add_argument("--ml-hold-bars", type=int, default=16, help="timeout exit bars for ML mode")
+    p.add_argument("--ml-feature-warmup-bars", type=int, default=120, help="minimum bars for ML feature extraction")
+    p.add_argument("--ml-entry-gap-bars", type=int, default=2, help="minimum bars between entries in ML mode")
+    p.add_argument("--trailing-stop-pct", type=float, default=0.004, help="trailing stop ratio")
 
     # Risk and execution
-    p.add_argument("--cash-buffer-pct", type=float, default=0.12, help="keep this cash ratio unused")
-    p.add_argument("--stop-loss-pct", type=float, default=0.008, help="stop-loss ratio")
+    p.add_argument("--cash-buffer-pct", type=float, default=0.10, help="keep this cash ratio unused")
+    p.add_argument("--stop-loss-pct", type=float, default=0.006, help="stop-loss ratio")
     p.add_argument("--take-profit-pct", type=float, default=0.020, help="take-profit ratio")
-    p.add_argument("--cooldown-bars", type=int, default=50, help="bars to wait after exit")
-    p.add_argument("--entry-confirm-bars", type=int, default=4, help="consecutive buy signals required")
-    p.add_argument("--exit-confirm-bars", type=int, default=4, help="consecutive sell signals required")
-    p.add_argument("--min-hold-bars", type=int, default=3, help="minimum bars to hold before normal exit")
     p.add_argument("--fee-rate", type=float, default=0.0005, help="fee rate for sizing/pnl")
     p.add_argument("--paper-cash", type=float, default=10_000_000, help="fallback paper cash when balance inquiry fails")
     p.add_argument("--max-invested-pct", type=float, default=0.30, help="max total invested fraction of portfolio equity")
-    p.add_argument("--max-positions", type=int, default=2, help="max number of concurrent positions")
-    p.add_argument("--min-order-krw", type=float, default=250_000, help="skip buy when target order value is below this amount")
+    p.add_argument("--max-positions", type=int, default=4, help="max number of concurrent positions")
+    p.add_argument("--min-order-krw", type=float, default=150_000, help="skip buy when target order value is below this amount")
     p.add_argument("--retry", type=int, default=3, help="quote retry count")
     p.add_argument("--throttle-ms", type=int, default=800, help="delay between symbols in milliseconds")
     p.add_argument(
         "--no-buy-before-close-min",
         type=int,
-        default=25,
+        default=35,
         help="block new buys during last N minutes before market close",
     )
     p.add_argument("--no-buy-morning-start-hhmm", type=int, default=900, help="morning no-buy start (HHMM)")
-    p.add_argument("--no-buy-morning-end-hhmm", type=int, default=1000, help="morning no-buy end (HHMM, exclusive)")
-    p.add_argument("--dry-run", action="store_true", help="print only, no order requests")
+    p.add_argument("--no-buy-morning-end-hhmm", type=int, default=930, help="morning no-buy end (HHMM, exclusive)")
+    p.add_argument("--dry-run", action="store_true", default=True, help="print only, no order requests")
     p.add_argument("--log-file", default="logs/realtime_events.txt", help="important event log path")
     p.add_argument("--log-rotate-minutes", type=int, default=1440, help="create a new log file every N minutes")
 
@@ -213,13 +206,25 @@ def resample_ohlc(rows: List[Dict], bar_minutes: int) -> List[Dict[str, float]]:
     if bar_minutes == 1:
         out = []
         for r in rows:
+            d = r.get("stck_bsop_date", "")
+            t = r.get("stck_cntg_hour", "")
             o = r.get("stck_oprc")
             h = r.get("stck_hgpr")
             l = r.get("stck_lwpr")
             c = r.get("stck_prpr")
-            if not (o and h and l and c):
+            v = r.get("cntg_vol") or r.get("acml_vol") or "0"
+            if not (o and h and l and c) or len(d) != 8 or len(t) != 6:
                 continue
-            out.append({"open": float(o), "high": float(h), "low": float(l), "close": float(c)})
+            out.append(
+                {
+                    "date": f"{d[:4]}-{d[4:6]}-{d[6:8]} {t[:2]}:{t[2:4]}:{t[4:6]}",
+                    "open": float(o),
+                    "high": float(h),
+                    "low": float(l),
+                    "close": float(c),
+                    "volume": float(v),
+                }
+            )
         return out
 
     buckets: Dict[str, Dict[str, float]] = {}
@@ -234,124 +239,96 @@ def resample_ohlc(rows: List[Dict], bar_minutes: int) -> List[Dict[str, float]]:
             continue
         floored = (int(t[2:4]) // bar_minutes) * bar_minutes
         key = f"{d}{t[:2]}{floored:02d}"
+        v = float(r.get("cntg_vol") or r.get("acml_vol") or 0.0)
         if key not in buckets:
-            buckets[key] = {"open": float(o), "high": float(h), "low": float(l), "close": float(c)}
+            buckets[key] = {
+                "date": f"{d[:4]}-{d[4:6]}-{d[6:8]} {t[:2]}:{floored:02d}:00",
+                "open": float(o),
+                "high": float(h),
+                "low": float(l),
+                "close": float(c),
+                "volume": v,
+            }
         else:
             b = buckets[key]
             b["high"] = max(b["high"], float(h))
             b["low"] = min(b["low"], float(l))
             b["close"] = float(c)
+            b["volume"] += v
     return [buckets[k] for k in sorted(buckets.keys())]
 
 
-def _stoch_k(highs: List[float], lows: List[float], closes: List[float], window: int) -> float | None:
-    if len(closes) < window:
-        return None
-    hh = max(highs[-window:])
-    ll = min(lows[-window:])
-    if hh == ll:
-        return 50.0
-    return (closes[-1] - ll) / (hh - ll) * 100.0
+def _sigmoid(x: float) -> float:
+    x = max(-40.0, min(40.0, x))
+    return 1.0 / (1.0 + math.exp(-x))
 
 
-def multi_factor_signal(
+def _rolling_rank_01(values: List[float], x: float) -> float:
+    if not values:
+        return 0.5
+    n = len(values)
+    le = 0
+    for v in values:
+        if v <= x:
+            le += 1
+    return max(0.0, min(1.0, le / n))
+
+
+def ml_signal_from_ohlc(
     ohlc: List[Dict[str, float]],
-    short: int,
-    long: int,
-    mom_window: int,
-    stoch_window: int,
-    stoch_smooth: int,
-    entry_threshold: float,
-    exit_threshold: float,
-) -> tuple[int, Dict[str, float]]:
-    closes = [x["close"] for x in ohlc]
-    highs = [x["high"] for x in ohlc]
-    lows = [x["low"] for x in ohlc]
-    need = max(long, mom_window + 1, stoch_window + stoch_smooth)
-    if len(closes) < need:
-        return 0, {"score": 0.0}
-
-    short_sma = sum(closes[-short:]) / short
-    long_sma = sum(closes[-long:]) / long
-    trend = 1.0 if short_sma > long_sma else -1.0
-
-    mom = (closes[-1] / closes[-1 - mom_window]) - 1.0
-    mom_score = max(-1.0, min(1.0, mom / 0.01))
-
-    k_vals: List[float] = []
-    for i in range(stoch_smooth):
-        end = len(closes) - i
-        k = _stoch_k(highs[:end], lows[:end], closes[:end], stoch_window)
-        if k is not None:
-            k_vals.append(k)
-    if not k_vals:
-        return 0, {"score": 0.0}
-    k_now = k_vals[0]
-    d_now = sum(k_vals) / len(k_vals)
-    stoch_bias = (50.0 - k_now) / 50.0
-    cross = 0.3 if k_now > d_now else -0.3
-
-    score = 0.45 * trend + 0.35 * mom_score + 0.15 * stoch_bias + 0.05 * cross
-    if score >= entry_threshold:
-        signal = 1
-    elif score <= exit_threshold:
-        signal = -1
-    else:
-        signal = 0
-    return signal, {
-        "score": score,
-        "mom": mom,
-        "k": k_now,
-        "d": d_now,
-        "short_sma": short_sma,
-        "long_sma": long_sma,
+    feature_columns: List[str],
+    clf_model: Any,
+    reg_model: Any,
+    signal_mode: str,
+    alpha_ret_scale: float,
+    alpha_rank_window: int,
+    alpha_raw_hist: List[float],
+) -> tuple[float | None, Dict[str, float]]:
+    if len(ohlc) < 70:
+        return None, {"score": 0.0}
+    data = {
+        "date": [str(x.get("date", "")) for x in ohlc],
+        "open": np.asarray([float(x["open"]) for x in ohlc], dtype=float),
+        "high": np.asarray([float(x["high"]) for x in ohlc], dtype=float),
+        "low": np.asarray([float(x["low"]) for x in ohlc], dtype=float),
+        "close": np.asarray([float(x["close"]) for x in ohlc], dtype=float),
+        "volume": np.asarray([float(x.get("volume", 0.0)) for x in ohlc], dtype=float),
     }
+    rows = build_rows(
+        data=data,
+        horizon=1,
+        label_mode="fixed",
+        up_threshold=0.01,
+        down_threshold=0.01,
+        atr_up_mult=2.0,
+        atr_down_mult=1.2,
+        atr_floor_pct=0.003,
+    )
+    if not rows:
+        return None, {"score": 0.0}
+    last = rows[-1]
+    try:
+        x = np.asarray([[float(last[c]) for c in feature_columns]], dtype=float)
+    except Exception:
+        return None, {"score": 0.0}
 
+    prob = float(clf_model.predict_proba(x)[0, 1])  # type: ignore[attr-defined]
+    if signal_mode == "prob":
+        return prob, {"score": prob, "prob": prob, "alpha_raw": prob, "ret_pred": 0.0}
 
-def ma_cross_level_signal(
-    ohlc: List[Dict[str, float]],
-    ma_a: int,
-    ma_b: int,
-    level_window: int,
-    buy_level: float,
-    sell_level: float,
-) -> tuple[int, Dict[str, float]]:
-    if ma_a <= 0 or ma_b <= 0:
-        return 0, {"score": 0.0}
-    short = min(ma_a, ma_b)
-    long = max(ma_a, ma_b)
-    need = max(long + 1, level_window)
-
-    closes = [x["close"] for x in ohlc]
-    if len(closes) < need:
-        return 0, {"score": 0.0}
-
-    short_now = sum(closes[-short:]) / short
-    long_now = sum(closes[-long:]) / long
-    short_prev = sum(closes[-1 - short : -1]) / short
-    long_prev = sum(closes[-1 - long : -1]) / long
-    spread_prev = short_prev - long_prev
-    spread_now = short_now - long_now
-
-    recent = closes[-level_window:]
-    lo = min(recent)
-    hi = max(recent)
-    if hi == lo:
-        level = 0.5
+    ret_pred = float(reg_model.predict(x)[0]) if reg_model is not None else 0.0
+    if reg_model is None:
+        alpha_raw = prob
     else:
-        level = (closes[-1] - lo) / (hi - lo)
-    level = max(0.0, min(1.0, level))
-
-    cross_up = spread_prev <= 0 and spread_now > 0
-    cross_down = spread_prev >= 0 and spread_now < 0
-    if cross_up and level >= buy_level:
-        signal = 1
-    elif cross_down and level <= sell_level:
-        signal = -1
-    else:
-        signal = 0
-    spread_pct = 0.0 if long_now == 0 else (spread_now / long_now) * 100.0
-    return signal, {"score": level, "ma_short": short_now, "ma_long": long_now, "spread_pct": spread_pct}
+        ret_score = _sigmoid(ret_pred / max(1e-6, float(alpha_ret_scale)))
+        alpha_raw = prob * ret_score
+    alpha_raw_hist.append(alpha_raw)
+    w = max(10, int(alpha_rank_window))
+    if len(alpha_raw_hist) > w * 3:
+        del alpha_raw_hist[: len(alpha_raw_hist) - (w * 3)]
+    recent = alpha_raw_hist[-w:]
+    score = _rolling_rank_01(recent, alpha_raw)
+    return score, {"score": score, "prob": prob, "alpha_raw": alpha_raw, "ret_pred": ret_pred}
 
 
 def get_hashkey(base_url: str, app_key: str, app_secret: str, body: Dict) -> str:
@@ -553,8 +530,11 @@ def main() -> None:
     entry_total_cost: Dict[str, float] = {s: 0.0 for s in symbols}
     held_bars: Dict[str, int] = {s: 0 for s in symbols}
     cooldown_left: Dict[str, int] = {s: 0 for s in symbols}
-    entry_streak: Dict[str, int] = {s: 0 for s in symbols}
-    exit_streak: Dict[str, int] = {s: 0 for s in symbols}
+    entry_bar_index: Dict[str, int] = {s: -10**9 for s in symbols}
+    last_entry_bar_index: Dict[str, int] = {s: -10**9 for s in symbols}
+    bar_index: Dict[str, int] = {s: 0 for s in symbols}
+    peak_price: Dict[str, float] = {s: 0.0 for s in symbols}
+    alpha_raw_hist: Dict[str, List[float]] = {s: [] for s in symbols}
     realized_pnl_krw: Dict[str, float] = {s: 0.0 for s in symbols}
     last_price: Dict[str, float] = {s: 0.0 for s in symbols}
     last_processed_bar: Dict[str, str] = {s: "" for s in symbols}
@@ -564,9 +544,18 @@ def main() -> None:
     cash_fail_streak = 0
     base_log_path = Path(args.log_file)
     base_log_path.parent.mkdir(parents=True, exist_ok=True)
-    signal_need = rt.required_bars_for_signal(args)
+    signal_need = required_bars_for_signal(args)
     warmup_bars = max(1, math.ceil(args.startup_lookback_minutes / max(1, args.bar_minutes)))
-    count_hint = max(signal_need + warmup_bars, signal_need + 5, 40)
+    count_hint = max(signal_need + warmup_bars, signal_need + 5, 120)
+
+    model_path = Path(args.ml_model_path)
+    if not model_path.exists():
+        raise RuntimeError(f"ML model not found: {model_path}")
+    with model_path.open("rb") as f:
+        ml_bundle = pickle.load(f)
+    ml_model = ml_bundle["model"]
+    ml_feature_columns: List[str] = list(ml_bundle["feature_columns"])
+    ml_reg_model = ml_bundle.get("reg_model")
 
     def current_log_path(now: datetime) -> Path:
         rotate = max(1, args.log_rotate_minutes)
@@ -592,8 +581,9 @@ def main() -> None:
     emit("start realtime paper trader", save=True)
     emit(
         f"symbols={','.join(symbols)} dry_run={args.dry_run} bar={args.bar_minutes}m "
-        f"model={args.strategy_mode}(short={args.short},long={args.long},mom={args.mom_window},"
-        f"stoch={args.stoch_window}/{args.stoch_smooth},ma_a={args.ma_a},ma_b={args.ma_b}) "
+        f"model={args.strategy_mode}(signal={args.ml_signal_mode},thr={args.ml_threshold:.2f},"
+        f"hold={args.ml_hold_bars},tp={args.take_profit_pct:.4f},sl={args.stop_loss_pct:.4f},"
+        f"trail={args.trailing_stop_pct:.4f}) "
         f"count_hint={count_hint}",
         save=True,
     )
@@ -718,90 +708,69 @@ def main() -> None:
                 if not ohlc:
                     emit(f"[{ts}] {symbol} no data")
                     continue
-                if args.strategy_mode == "ma_cross_level":
-                    signal, m = rt.ma_cross_level_signal(
-                        ohlc=ohlc,
-                        ma_a=args.ma_a,
-                        ma_b=args.ma_b,
-                        level_window=args.cross_level_window,
-                        buy_level=args.cross_buy_level,
-                        sell_level=args.cross_sell_level,
-                    )
-                else:
-                    signal, m = rt.multi_factor_signal(
-                        ohlc=ohlc,
-                        short=args.short,
-                        long=args.long,
-                        mom_window=args.mom_window,
-                        stoch_window=args.stoch_window,
-                        stoch_smooth=args.stoch_smooth,
-                        entry_threshold=args.entry_threshold,
-                        exit_threshold=args.exit_threshold,
-                    )
-                buy_reason = "multi_factor_signal" if args.strategy_mode == "multi_factor" else "ma_cross_crossup_level"
+                buy_reason = "ml_score"
                 sell_reason = "signal"
                 cross_info = ""
-                if args.strategy_mode == "ma_cross_level":
-                    cross_info = f" gap={m.get('spread_pct', 0.0):+.2f}%"
                 last_px = ohlc[-1]["close"]
                 last_price[symbol] = last_px
-                bar_ts = ""
-                if bars:
-                    d = bars[-1].get("stck_bsop_date", "")
-                    t = bars[-1].get("stck_cntg_hour", "")
-                    if len(d) == 8 and len(t) == 6:
-                        bar_ts = f"{d[:4]}-{d[4:6]}-{d[6:8]} {t[:2]}:{t[2:4]}:{t[4:6]}"
-                        cycle_bar_hms = f"{t[:2]}:{t[2:4]}:{t[4:6]}"
+                bar_ts = str(ohlc[-1].get("date", ""))
+                if len(bar_ts) >= 19:
+                    cycle_bar_hms = bar_ts[11:19]
                 if bar_ts and last_processed_bar[symbol] == bar_ts:
                     time.sleep(max(0, args.throttle_ms) / 1000.0)
                     continue
                 if bar_ts:
                     last_processed_bar[symbol] = bar_ts
-                ignore_close_window_signal = False
-                if bars:
-                    t = str(bars[-1].get("stck_cntg_hour", ""))
-                    if len(t) == 6:
-                        hhmm = int(t[:4])
-                        if 1520 <= hhmm <= 1529:
-                            ignore_close_window_signal = True
-                if ignore_close_window_signal:
-                    # Ignore noisy close-auction minutes (15:20~15:29) for strategy signals.
-                    signal = 0
+                bar_index[symbol] += 1
+                if cooldown_left[symbol] > 0:
+                    cooldown_left[symbol] -= 1
 
-                st = rt.SymbolState(
-                    has_position=has_position[symbol],
-                    held_qty=held_qty[symbol],
-                    entry_price=entry_price[symbol],
-                    entry_total_cost=entry_total_cost[symbol],
-                    held_bars=held_bars[symbol],
-                    cooldown_left=cooldown_left[symbol],
-                    entry_streak=entry_streak[symbol],
-                    exit_streak=exit_streak[symbol],
+                score, m = ml_signal_from_ohlc(
+                    ohlc=ohlc,
+                    feature_columns=ml_feature_columns,
+                    clf_model=ml_model,
+                    reg_model=ml_reg_model,
+                    signal_mode=args.ml_signal_mode,
+                    alpha_ret_scale=args.ml_alpha_ret_scale,
+                    alpha_rank_window=args.ml_alpha_rank_window,
+                    alpha_raw_hist=alpha_raw_hist[symbol],
                 )
-                transition = rt.evaluate_state_transition(
-                    state=st,
-                    signal=signal,
-                    last_px=last_px,
-                    strategy_mode=args.strategy_mode,
-                    stop_loss_pct=args.stop_loss_pct,
-                    take_profit_pct=args.take_profit_pct,
-                    entry_confirm_bars=args.entry_confirm_bars,
-                    exit_confirm_bars=args.exit_confirm_bars,
-                    min_hold_bars=args.min_hold_bars,
-                    hard_liquidation_window=hard_liquidation_window,
-                    ease_sell_window=ease_sell_window,
-                    ease_ratio=ease_ratio,
-                )
-                signal = int(transition["signal"])
-                sell_reason = str(transition["sell_reason"])
-                has_position[symbol] = st.has_position
-                held_qty[symbol] = st.held_qty
-                entry_price[symbol] = st.entry_price
-                entry_total_cost[symbol] = st.entry_total_cost
-                held_bars[symbol] = st.held_bars
-                cooldown_left[symbol] = st.cooldown_left
-                entry_streak[symbol] = st.entry_streak
-                exit_streak[symbol] = st.exit_streak
+                if score is None or len(ohlc) < max(70, int(args.ml_feature_warmup_bars)):
+                    cycle_summary.append(f"{symbol} score=NA warmup")
+                    time.sleep(max(0, args.throttle_ms) / 1000.0)
+                    continue
+
+                if has_position[symbol]:
+                    held_bars[symbol] = max(0, bar_index[symbol] - entry_bar_index[symbol])
+                    peak_price[symbol] = max(peak_price[symbol], last_px)
+                else:
+                    held_bars[symbol] = 0
+
+                signal = 0
+                if has_position[symbol]:
+                    gross_ret = (last_px / entry_price[symbol] - 1.0) if entry_price[symbol] > 0 else 0.0
+                    dd_from_peak = (
+                        (last_px / peak_price[symbol] - 1.0) if peak_price[symbol] > 0 else 0.0
+                    )
+                    if hard_liquidation_window:
+                        signal = -1
+                        sell_reason = "hard_close"
+                    elif args.stop_loss_pct > 0 and gross_ret <= -args.stop_loss_pct:
+                        signal = -1
+                        sell_reason = "stop_loss"
+                    elif args.take_profit_pct > 0 and gross_ret >= args.take_profit_pct:
+                        signal = -1
+                        sell_reason = "take_profit"
+                    elif args.trailing_stop_pct > 0 and dd_from_peak <= -args.trailing_stop_pct:
+                        signal = -1
+                        sell_reason = "trailing_stop"
+                    elif held_bars[symbol] >= max(1, int(args.ml_hold_bars)):
+                        signal = -1
+                        sell_reason = "timeout"
+                else:
+                    allow_entry_gap = (bar_index[symbol] - last_entry_bar_index[symbol]) >= max(1, int(args.ml_entry_gap_bars))
+                    if cooldown_left[symbol] <= 0 and allow_entry_gap and score >= float(args.ml_threshold):
+                        signal = 1
 
                 if signal == 1 and not has_position[symbol]:
                     now_kst_symbol = datetime.now(KST)
@@ -830,15 +799,6 @@ def main() -> None:
                     if no_new_buy_window:
                         cycle_summary.append(
                             f"{symbol} score={m.get('score', 0):.2f}{cross_info} cd={cooldown_left[symbol]} no_new_buy"
-                        )
-                        time.sleep(max(0, args.throttle_ms) / 1000.0)
-                        continue
-                    entry_wait = transition.get("entry_wait")
-                    if entry_wait:
-                        cur, req = entry_wait
-                        cycle_summary.append(
-                            f"{symbol} score={m.get('score', 0):.2f}{cross_info} "
-                            f"cd={cooldown_left[symbol]} e={cur}/{req}"
                         )
                         time.sleep(max(0, args.throttle_ms) / 1000.0)
                         continue
@@ -915,8 +875,8 @@ def main() -> None:
                     if args.dry_run:
                         emit(
                             f"[{ts}] >>> BUY <<< {symbol} bar={bar_ts or '-'} qty={qty} "
-                            f"score={m.get('score', 0):.2f} mom={m.get('mom', 0)*100:.2f}% "
-                            f"k={m.get('k', 0):.1f} d={m.get('d', 0):.1f} "
+                            f"score={m.get('score', 0):.2f} prob={m.get('prob', 0):.3f} "
+                            f"alpha={m.get('alpha_raw', 0):.4f} "
                             f"cash={orderable_cash:.0f} budget={order_budget:.0f} fee={buy_fee:,.0f} "
                             f"reason={buy_reason} (dry-run)",
                             save=True,
@@ -959,7 +919,9 @@ def main() -> None:
                         entry_price[symbol] = last_px
                         entry_total_cost[symbol] = total_buy
                         held_bars[symbol] = 0
-                        entry_streak[symbol] = 0
+                        entry_bar_index[symbol] = bar_index[symbol]
+                        last_entry_bar_index[symbol] = bar_index[symbol]
+                        peak_price[symbol] = last_px
                         total_realized = sum(realized_pnl_krw.values())
                         total_unrealized = sum(
                             (last_price[s] - entry_price[s]) * held_qty[s]
@@ -972,25 +934,6 @@ def main() -> None:
                             save=True,
                         )
                 elif signal == -1 and has_position[symbol]:
-                    hold_wait = transition.get("hold_wait")
-                    if hold_wait:
-                        cur, req = hold_wait
-                        cycle_summary.append(
-                            f"{symbol} score={m.get('score', 0):.2f}{cross_info} "
-                            f"cd={cooldown_left[symbol]} h={cur}/{req}"
-                        )
-                        time.sleep(max(0, args.throttle_ms) / 1000.0)
-                        continue
-                    exit_wait = transition.get("exit_wait")
-                    if exit_wait:
-                        cur, req = exit_wait
-                        cycle_summary.append(
-                            f"{symbol} score={m.get('score', 0):.2f}{cross_info} "
-                            f"cd={cooldown_left[symbol]} x={cur}/{req}"
-                        )
-                        time.sleep(max(0, args.throttle_ms) / 1000.0)
-                        continue
-
                     qty = held_qty[symbol]
                     sell_gross = last_px * qty
                     sell_fee = sell_gross * args.fee_rate
@@ -1045,8 +988,9 @@ def main() -> None:
                     entry_price[symbol] = 0.0
                     entry_total_cost[symbol] = 0.0
                     held_bars[symbol] = 0
-                    exit_streak[symbol] = 0
-                    cooldown_left[symbol] = args.cooldown_bars
+                    entry_bar_index[symbol] = -10**9
+                    peak_price[symbol] = 0.0
+                    cooldown_left[symbol] = 0
                     total_realized = sum(realized_pnl_krw.values())
                     total_unrealized = sum(
                         (last_price[s] - entry_price[s]) * held_qty[s]
@@ -1114,8 +1058,9 @@ def main() -> None:
                         entry_price[symbol] = 0.0
                         entry_total_cost[symbol] = 0.0
                         held_bars[symbol] = 0
-                        exit_streak[symbol] = 0
-                        cooldown_left[symbol] = args.cooldown_bars
+                        entry_bar_index[symbol] = -10**9
+                        peak_price[symbol] = 0.0
+                        cooldown_left[symbol] = 0
                         total_realized = sum(realized_pnl_krw.values())
                         total_unrealized = sum(
                             (last_price[s] - entry_price[s]) * held_qty[s]

@@ -11,13 +11,13 @@ from strategy_runtime import SymbolState, evaluate_state_transition, ma_cross_le
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Replay-test realtime strategy on historical 1m csv data")
-    p.add_argument("--data-dir", default="data/backtest_sets/train_1m", help="directory with *1m*.csv files")
+    p.add_argument("--data-dir", default="data/backtest_sets/full_1m", help="directory with *1m*.csv files")
     p.add_argument("--cash", type=float, default=10_000_000)
     p.add_argument("--fee-rate", type=float, default=0.0005)
-    p.add_argument("--cash-buffer-pct", type=float, default=0.12)
-    p.add_argument("--max-invested-pct", type=float, default=0.30)
-    p.add_argument("--max-positions", type=int, default=2)
-    p.add_argument("--min-order-krw", type=float, default=250_000)
+    p.add_argument("--cash-buffer-pct", type=float, default=0.10)
+    p.add_argument("--max-invested-pct", type=float, default=0.90)
+    p.add_argument("--max-positions", type=int, default=4)
+    p.add_argument("--min-order-krw", type=float, default=150_000)
     p.add_argument("--no-buy-before-close-min", type=int, default=25)
     p.add_argument("--no-buy-morning-start-hhmm", type=int, default=900)
     p.add_argument("--no-buy-morning-end-hhmm", type=int, default=1000)
@@ -37,10 +37,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--cross-sell-level", type=float, default=0.55)
     p.add_argument("--entry-confirm-bars", type=int, default=5)
     p.add_argument("--exit-confirm-bars", type=int, default=4)
-    p.add_argument("--min-hold-bars", type=int, default=3)
-    p.add_argument("--cooldown-bars", type=int, default=50)
+    p.add_argument("--min-hold-bars", type=int, default=4)
+    p.add_argument("--cooldown-bars", type=int, default=40)
     p.add_argument("--stop-loss-pct", type=float, default=0.008)
-    p.add_argument("--take-profit-pct", type=float, default=0.020)
+    p.add_argument("--take-profit-pct", type=float, default=0.02)
     return p.parse_args()
 
 

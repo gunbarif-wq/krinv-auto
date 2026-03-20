@@ -36,60 +36,111 @@ class TrialResult:
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Random-search train-only params for backtest_realtime_from_csv.py")
     p.add_argument("--data-dir", default="data/backtest_sets/train_1m")
-    p.add_argument("--n-trials", type=int, default=40)
+    p.add_argument("--n-trials", type=int, default=100)
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--sleep-sec", type=float, default=0.0, help="sleep between trials")
-    p.add_argument("--min-trades", type=int, default=40, help="penalize too-few-trades candidates")
-    p.add_argument("--max-trades", type=int, default=600, help="penalize too-many-trades candidates")
+    p.add_argument("--min-trades", type=int, default=120, help="penalize too-few-trades candidates")
+    p.add_argument("--max-trades", type=int, default=2200, help="penalize too-many-trades candidates")
     p.add_argument("--strategy-mode", default="ma_cross_level", choices=["ma_cross_level", "multi_factor"])
     p.add_argument("--out-dir", default="data/runs")
     p.add_argument("--save-stdout", action="store_true", help="save each trial stdout to a text file")
     return p.parse_args()
 
 
+BASE_PARAMS_COMMON: Dict[str, str] = {
+    # Mirrors backtest_realtime_from_csv.py defaults.
+    "--cash-buffer-pct": "0.12",
+    "--max-invested-pct": "0.90",
+    "--max-positions": "4",
+    "--min-order-krw": "150000",
+    "--no-buy-before-close-min": "25",
+    "--no-buy-morning-start-hhmm": "900",
+    "--no-buy-morning-end-hhmm": "1000",
+    "--entry-confirm-bars": "5",
+    "--exit-confirm-bars": "4",
+    "--min-hold-bars": "4",
+    "--cooldown-bars": "40",
+    "--stop-loss-pct": "0.008",
+    "--take-profit-pct": "0.020",
+}
+
+BASE_PARAMS_BY_MODE: Dict[str, Dict[str, str]] = {
+    "ma_cross_level": {
+        "--ma-a": "6",
+        "--ma-b": "26",
+        "--cross-level-window": "120",
+        "--cross-buy-level": "0.93",
+        "--cross-sell-level": "0.55",
+    },
+    "multi_factor": {
+        "--short": "5",
+        "--long": "20",
+        "--mom-window": "12",
+        "--stoch-window": "14",
+        "--stoch-smooth": "3",
+        "--entry-threshold": "0.45",
+        "--exit-threshold": "-0.25",
+    },
+}
+
+
+def default_params(strategy_mode: str) -> Dict[str, str]:
+    params: Dict[str, str] = {"--strategy-mode": strategy_mode}
+    params.update(BASE_PARAMS_COMMON)
+    params.update(BASE_PARAMS_BY_MODE[strategy_mode])
+    return params
+
+
 def sample_params(rng: random.Random, strategy_mode: str) -> Dict[str, str]:
     params: Dict[str, str] = {
         "--strategy-mode": strategy_mode,
-        "--cash-buffer-pct": f"{rng.choice([0.08, 0.10, 0.12, 0.15]):.2f}",
-        "--max-invested-pct": f"{rng.choice([0.18, 0.20, 0.22, 0.25, 0.30]):.2f}",
-        "--max-positions": str(rng.choice([2, 3, 4])),
-        "--min-order-krw": str(rng.choice([150_000, 200_000, 250_000])),
-        "--no-buy-before-close-min": str(rng.choice([25, 30, 35])),
+        # Wider ranges around backtest_realtime defaults.
+        "--cash-buffer-pct": f"{rng.choice([0.05, 0.08, 0.10, 0.12, 0.15, 0.18, 0.22, 0.25]):.2f}",
+        "--max-invested-pct": f"{rng.choice([0.30, 0.40, 0.50, 0.60, 0.70, 0.80, 0.90, 0.95]):.2f}",
+        "--max-positions": str(rng.choice([2, 3, 4, 5, 6])),
+        "--min-order-krw": str(rng.choice([100_000, 150_000, 200_000, 250_000, 300_000, 400_000])),
+        "--no-buy-before-close-min": str(rng.choice([10, 15, 20, 25, 30, 35, 40, 50])),
         "--no-buy-morning-start-hhmm": "900",
-        "--no-buy-morning-end-hhmm": str(rng.choice([930, 945, 1000, 1030])),
-        "--cooldown-bars": str(rng.choice([20, 30, 35, 40, 50])),
-        "--min-hold-bars": str(rng.choice([2, 3, 4, 5])),
-        "--stop-loss-pct": f"{rng.choice([0.007, 0.008, 0.009, 0.010, 0.012]):.3f}",
-        "--take-profit-pct": f"{rng.choice([0.016, 0.018, 0.020, 0.022, 0.025]):.3f}",
+        "--no-buy-morning-end-hhmm": str(rng.choice([930, 945, 1000, 1015, 1030, 1100])),
+        "--entry-confirm-bars": str(rng.choice([1, 2, 3, 4, 5, 6, 8])),
+        "--exit-confirm-bars": str(rng.choice([1, 2, 3, 4, 5, 6, 8])),
+        "--cooldown-bars": str(rng.choice([10, 20, 30, 40, 50, 60, 80])),
+        "--min-hold-bars": str(rng.choice([1, 2, 3, 4, 5, 6, 8])),
+        "--stop-loss-pct": f"{rng.choice([0.005, 0.006, 0.007, 0.008, 0.009, 0.010, 0.012, 0.015]):.3f}",
+        "--take-profit-pct": f"{rng.choice([0.012, 0.015, 0.018, 0.020, 0.022, 0.025, 0.030, 0.035]):.3f}",
     }
     if strategy_mode == "ma_cross_level":
-        ma_a = rng.choice([5, 6, 7, 8, 9, 10])
-        ma_b = rng.choice([18, 20, 22, 24, 26, 30])
+        ma_a = rng.choice([4, 5, 6, 7, 8, 9, 10, 12])
+        ma_b = rng.choice([16, 20, 24, 26, 30, 36, 42, 50, 60])
         if ma_b <= ma_a:
             ma_b = ma_a + 2
-        buy_level = rng.choice([0.93, 0.95, 0.97, 0.98])
-        sell_level = rng.choice([0.45, 0.50, 0.55, 0.60])
+        buy_level = rng.choice([0.88, 0.90, 0.93, 0.95, 0.97, 0.99])
+        sell_level = rng.choice([0.30, 0.40, 0.45, 0.50, 0.55, 0.60, 0.70])
         if sell_level >= buy_level:
             sell_level = max(0.20, buy_level - 0.15)
         params.update(
             {
                 "--ma-a": str(ma_a),
                 "--ma-b": str(ma_b),
-                "--cross-level-window": str(rng.choice([60, 75, 90, 120])),
+                "--cross-level-window": str(rng.choice([45, 60, 75, 90, 120, 150, 180, 240])),
                 "--cross-buy-level": f"{buy_level:.2f}",
                 "--cross-sell-level": f"{sell_level:.2f}",
             }
         )
     else:
+        short = rng.choice([3, 4, 5, 6, 7, 8, 10])
+        long = rng.choice([12, 16, 20, 24, 28, 32, 40])
+        if long <= short:
+            long = short + 2
         params.update(
             {
-                "--short": str(rng.choice([4, 5, 6, 7])),
-                "--long": str(rng.choice([18, 20, 22, 24, 26])),
-                "--mom-window": str(rng.choice([8, 10, 12, 14])),
-                "--stoch-window": str(rng.choice([10, 12, 14, 16])),
-                "--stoch-smooth": str(rng.choice([2, 3, 4])),
-                "--entry-threshold": f"{rng.choice([0.35, 0.40, 0.45, 0.50]):.2f}",
-                "--exit-threshold": f"{rng.choice([-0.35, -0.30, -0.25, -0.20]):.2f}",
+                "--short": str(short),
+                "--long": str(long),
+                "--mom-window": str(rng.choice([6, 8, 10, 12, 14, 16, 20])),
+                "--stoch-window": str(rng.choice([8, 10, 12, 14, 16, 20])),
+                "--stoch-smooth": str(rng.choice([2, 3, 4, 5, 6])),
+                "--entry-threshold": f"{rng.choice([0.25, 0.30, 0.35, 0.40, 0.45, 0.50, 0.55, 0.60]):.2f}",
+                "--exit-threshold": f"{rng.choice([-0.45, -0.40, -0.35, -0.30, -0.25, -0.20, -0.15, -0.10]):.2f}",
             }
         )
     return params
@@ -184,9 +235,11 @@ def main() -> None:
     with csv_path.open("w", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(f, fieldnames=fieldnames)
         w.writeheader()
-        # Trial 1 uses current defaults (no extra overrides except strategy/data-dir).
-        default_params = {"--strategy-mode": args.strategy_mode}
-        candidates = [default_params] + [sample_params(rng, args.strategy_mode) for _ in range(max(0, args.n_trials - 1))]
+        # Trial 1 uses the explicit baseline aligned with backtest_realtime defaults.
+        default_trial_params = default_params(args.strategy_mode)
+        candidates = [default_trial_params] + [
+            sample_params(rng, args.strategy_mode) for _ in range(max(0, args.n_trials - 1))
+        ]
         total = len(candidates)
         for i, params in enumerate(candidates, start=1):
             result, stdout = run_trial(i, args, params)
