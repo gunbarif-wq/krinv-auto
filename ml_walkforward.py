@@ -23,7 +23,7 @@ from train_ml_signal import class_weights
 
 
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Walk-forward ML training/validation/test with automatic policy selection")
+    p = argparse.ArgumentParser(description="Walk-forward ML training/validation/test with fixed policy parameters")
     p.add_argument("--data-root", default="data/backtest_sets_047810_5y")
     p.add_argument("--symbol", default="047810")
     p.add_argument("--model-kind", default="logistic", choices=["logistic", "gboost", "hgb", "rf", "et", "auto"])
@@ -55,39 +55,24 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--min-profit-factor", type=float, default=1.0)
     p.add_argument("--min-trades", type=int, default=30)
     p.add_argument("--max-trades", type=int, default=400)
-    p.add_argument("--max-policy-evals", type=int, default=400)
     p.add_argument("--seed", type=int, default=42)
-    p.add_argument("--threshold-grid", default="0.60,0.65,0.70,0.75,0.80,0.85")
-    p.add_argument("--hold-grid", default="10,20,30,40")
-    p.add_argument("--skip-open-grid", default="0,10,20")
-    p.add_argument("--skip-close-grid", default="0,10,20")
-    p.add_argument("--loss-streak-grid", default="0,2,3")
-    p.add_argument("--cooldown-grid", default="0,30,60")
-    p.add_argument("--take-profit-grid", default="0.0,0.01,0.015")
-    p.add_argument("--stop-loss-grid", default="0.0,0.006,0.01")
-    p.add_argument("--trailing-stop-grid", default="0.0,0.006,0.01")
-    p.add_argument("--max-positions-grid", default="1,2,3")
-    p.add_argument("--position-size-grid", default="0.25,0.35,0.5")
-    p.add_argument("--min-entry-gap-grid", default="1,2,3")
+    p.add_argument("--threshold", type=float, default=0.80)
+    p.add_argument("--hold-bars", type=int, default=20)
+    p.add_argument("--skip-open-min", type=int, default=0)
+    p.add_argument("--skip-close-min", type=int, default=10)
+    p.add_argument("--loss-streak-for-cooldown", type=int, default=1)
+    p.add_argument("--cooldown-bars", type=int, default=30)
+    p.add_argument("--take-profit-pct", type=float, default=0.0)
+    p.add_argument("--stop-loss-pct", type=float, default=0.0)
+    p.add_argument("--trailing-stop-pct", type=float, default=0.0)
+    p.add_argument("--max-concurrent-positions", type=int, default=1)
+    p.add_argument("--position-size-pct", type=float, default=1.0)
+    p.add_argument("--min-entry-gap-bars", type=int, default=1)
     p.add_argument("--entry-start-hhmm", type=int, default=900)
     p.add_argument("--entry-end-hhmm", type=int, default=1530)
     p.add_argument("--initial-cash", type=float, default=10_000_000)
     p.add_argument("--out-dir", default="data/ml")
     return p.parse_args()
-
-
-def parse_float_grid(s: str) -> List[float]:
-    out = [float(x.strip()) for x in s.split(",") if x.strip()]
-    if not out:
-        raise RuntimeError("empty float grid")
-    return out
-
-
-def parse_int_grid(s: str) -> List[int]:
-    out = [int(x.strip()) for x in s.split(",") if x.strip()]
-    if not out:
-        raise RuntimeError("empty int grid")
-    return out
 
 
 def feature_columns_from_rows(rows: List[Dict[str, str]]) -> List[str]:
@@ -352,21 +337,8 @@ def policy_score(
     return s
 
 
-def threshold_candidates_from_args(args: argparse.Namespace, thr_grid: List[float]) -> List[float]:
-    candidates = sorted(set(thr_grid))
-    if candidates:
-        return candidates
-    out: List[float] = []
-    thr = float(args.thr_start)
-    while thr <= float(args.thr_end) + 1e-12:
-        out.append(round(thr, 6))
-        thr += float(args.thr_step)
-    return out or [0.7]
-
-
 def main() -> None:
     args = parse_args()
-    rng = random.Random(args.seed)
 
     full_csv = Path(args.data_root) / "full_1m" / f"{args.symbol}_1m_full.csv"
     if not full_csv.exists():
@@ -392,40 +364,23 @@ def main() -> None:
     if len(all_days) < need:
         raise RuntimeError(f"not enough days for walk-forward: have={len(all_days)} need={need}")
 
-    thr_grid = parse_float_grid(args.threshold_grid)
-    hold_grid = parse_int_grid(args.hold_grid)
-    open_grid = parse_int_grid(args.skip_open_grid)
-    close_grid = parse_int_grid(args.skip_close_grid)
-    streak_grid = parse_int_grid(args.loss_streak_grid)
-    cooldown_grid = parse_int_grid(args.cooldown_grid)
-    tp_grid = parse_float_grid(args.take_profit_grid)
-    sl_grid = parse_float_grid(args.stop_loss_grid)
-    tr_grid = parse_float_grid(args.trailing_stop_grid)
-    max_pos_grid = parse_int_grid(args.max_positions_grid)
-    pos_size_grid = parse_float_grid(args.position_size_grid)
-    entry_gap_grid = parse_int_grid(args.min_entry_gap_grid)
-    policy_combos = [
-        x
-        for x in [
-            (h, o, c, s, cd, tp, sl, tr, mp, psz, eg)
-            for h in hold_grid
-            for o in open_grid
-            for c in close_grid
-            for s in streak_grid
-            for cd in cooldown_grid
-            for tp in tp_grid
-            for sl in sl_grid
-            for tr in tr_grid
-            for mp in max_pos_grid
-            for psz in pos_size_grid
-            for eg in entry_gap_grid
-        ]
-        if not (x[3] <= 0 and x[4] > 0)
-        and not (x[3] > 0 and x[4] <= 0)
-        and not (x[5] <= 0 and x[6] <= 0 and x[7] <= 0)
-    ]
-    if len(policy_combos) > args.max_policy_evals > 0:
-        policy_combos = rng.sample(policy_combos, k=args.max_policy_evals)
+    cfg_fixed = PolicyConfig(
+        threshold=float(args.threshold),
+        fee_roundtrip=float(args.fee_roundtrip),
+        hold_bars=max(1, int(args.hold_bars)),
+        entry_start_hhmm=int(args.entry_start_hhmm),
+        entry_end_hhmm=int(args.entry_end_hhmm),
+        skip_open_min=max(0, int(args.skip_open_min)),
+        skip_close_min=max(0, int(args.skip_close_min)),
+        loss_streak_for_cooldown=max(0, int(args.loss_streak_for_cooldown)),
+        cooldown_bars=max(0, int(args.cooldown_bars)),
+        take_profit_pct=max(0.0, float(args.take_profit_pct)),
+        stop_loss_pct=max(0.0, float(args.stop_loss_pct)),
+        trailing_stop_pct=max(0.0, float(args.trailing_stop_pct)),
+        max_concurrent_positions=max(1, int(args.max_concurrent_positions)),
+        position_size_pct=min(1.0, max(0.01, float(args.position_size_pct))),
+        min_entry_gap_bars=max(1, int(args.min_entry_gap_bars)),
+    )
 
     out_dir = Path(args.out_dir) / args.symbol
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -497,7 +452,6 @@ def main() -> None:
                 fold_idx += 1
                 continue
 
-            thr_candidates = threshold_candidates_from_args(args, thr_grid)
             model_evals = evaluate_models(
                 args=args,
                 y_train=y_train,
@@ -519,72 +473,36 @@ def main() -> None:
             best_val: Dict[str, float | int | str | None] | None = None
             best_test: Dict[str, float | int | str | None] | None = None
             best_model: ModelEval | None = None
-            best_any_score = -10**18
-            best_any_policy: PolicyConfig | None = None
-            best_any_val: Dict[str, float | int | str | None] | None = None
-            best_any_test: Dict[str, float | int | str | None] | None = None
-            best_any_model: ModelEval | None = None
 
             for m in model_evals:
-                for thr_c in thr_candidates:
-                    for hold, skip_open, skip_close, streak, cooldown, tp, sl, tr, mp, psz, eg in policy_combos:
-                        cfg = PolicyConfig(
-                            threshold=float(thr_c),
-                            fee_roundtrip=float(args.fee_roundtrip),
-                            hold_bars=int(hold),
-                            entry_start_hhmm=int(args.entry_start_hhmm),
-                            entry_end_hhmm=int(args.entry_end_hhmm),
-                            skip_open_min=int(skip_open),
-                            skip_close_min=int(skip_close),
-                            loss_streak_for_cooldown=int(streak),
-                            cooldown_bars=int(cooldown),
-                            take_profit_pct=max(0.0, float(tp)),
-                            stop_loss_pct=max(0.0, float(sl)),
-                            trailing_stop_pct=max(0.0, float(tr)),
-                            max_concurrent_positions=max(1, int(mp)),
-                            position_size_pct=min(1.0, max(0.01, float(psz))),
-                            min_entry_gap_bars=max(1, int(eg)),
-                        )
-                        val_res = run_policy(
-                            prob=m.signal_val,
-                            close=close_val,
-                            dates=dates_val,
-                            cfg=cfg,
-                            initial_cash=float(args.initial_cash),
-                        )
-                        s = policy_score(
-                            result=val_res,
-                            min_trades=args.min_trades,
-                            max_trades=args.max_trades,
-                            mdd_penalty=args.mdd_penalty,
-                            objective_mode=args.objective_mode,
-                            max_mdd_allowed=args.max_mdd_allowed,
-                            min_profit_factor=args.min_profit_factor,
-                        )
-                        val_trades = int(val_res["trades"])
-                        if s > best_any_score:
-                            best_any_score = s
-                            best_any_policy = cfg
-                            best_any_val = val_res
-                            best_any_model = m
-                            best_any_test = run_policy(
-                                prob=m.signal_test, close=close_test, dates=dates_test, cfg=cfg, initial_cash=float(args.initial_cash)
-                            )
-                        if args.min_trades <= val_trades <= args.max_trades and s > best_score:
-                            best_score = s
-                            best_policy = cfg
-                            best_val = val_res
-                            best_model = m
-                            best_test = run_policy(
-                                prob=m.signal_test, close=close_test, dates=dates_test, cfg=cfg, initial_cash=float(args.initial_cash)
-                            )
-
-            if best_policy is None or best_val is None or best_test is None:
-                best_score = best_any_score
-                best_policy = best_any_policy
-                best_val = best_any_val
-                best_test = best_any_test
-                best_model = best_any_model
+                val_res = run_policy(
+                    prob=m.signal_val,
+                    close=close_val,
+                    dates=dates_val,
+                    cfg=cfg_fixed,
+                    initial_cash=float(args.initial_cash),
+                )
+                s = policy_score(
+                    result=val_res,
+                    min_trades=args.min_trades,
+                    max_trades=args.max_trades,
+                    mdd_penalty=args.mdd_penalty,
+                    objective_mode=args.objective_mode,
+                    max_mdd_allowed=args.max_mdd_allowed,
+                    min_profit_factor=args.min_profit_factor,
+                )
+                if s > best_score:
+                    best_score = s
+                    best_policy = cfg_fixed
+                    best_val = val_res
+                    best_model = m
+                    best_test = run_policy(
+                        prob=m.signal_test,
+                        close=close_test,
+                        dates=dates_test,
+                        cfg=cfg_fixed,
+                        initial_cash=float(args.initial_cash),
+                    )
             if best_policy is None or best_val is None or best_test is None or best_model is None:
                 start += args.wf_step_days
                 fold_idx += 1
