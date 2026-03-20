@@ -38,6 +38,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--indicator-mode", default="local_rank01", choices=["raw01", "local_rank01"])
     p.add_argument("--indicator-window", type=int, default=120, help="window for local_rank01")
     p.add_argument("--score-threshold", type=float, default=0.80, help="0..1 threshold line on indicator panel")
+    p.add_argument("--bench-macd-threshold", type=float, default=0.4, help="benchmark threshold for macd_plus (0..1)")
+    p.add_argument("--bench-slowk-threshold", type=float, default=0.35, help="benchmark threshold for slow_k14_3 (0..1)")
     p.add_argument("--hold-bars", type=int, default=20)
     p.add_argument("--take-profit-pct", type=float, default=0.0)
     p.add_argument("--stop-loss-pct", type=float, default=0.0)
@@ -228,11 +230,20 @@ def main() -> None:
     score_threshold = float(np.clip(score_threshold, 0.0, 1.0))
 
     bench_results: Dict[str, Dict[str, float | int | str | None]] = {}
+    bench_thresholds = {
+        "macd_plus": float(np.clip(args.bench_macd_threshold, 0.0, 1.0))
+        if args.bench_macd_threshold is not None
+        else score_threshold,
+        "slow_k14_3": float(np.clip(args.bench_slowk_threshold, 0.0, 1.0))
+        if args.bench_slowk_threshold is not None
+        else score_threshold,
+    }
     for bench_col in ("macd_plus", "slow_k14_3"):
         if bench_col not in feature_series:
             continue
         bench_score = normalize_indicator(feature_series[bench_col], args.indicator_mode, args.indicator_window)
-        bench_prob = np.where(bench_score >= score_threshold, 1.0, 0.0)
+        bench_thr = bench_thresholds.get(bench_col, score_threshold)
+        bench_prob = np.where(bench_score >= bench_thr, 1.0, 0.0)
         bench_results[bench_col] = run_policy(
             prob=bench_prob,
             close=close,
@@ -269,7 +280,6 @@ def main() -> None:
     )
 
     prob_ds = prob[idx]
-    prob_norm = normalize_indicator(prob_ds, args.indicator_mode, args.indicator_window)
     try:
         import plotly.graph_objects as go
         from plotly.subplots import make_subplots
@@ -362,9 +372,9 @@ def main() -> None:
     pfig.add_trace(
         go.Scatter(
             x=x_all,
-            y=prob_norm,
+            y=prob_ds,
             mode="lines",
-            name="model_score",
+            name="model_prob",
             line=dict(width=1.2),
         ),
         row=2,
@@ -425,7 +435,8 @@ def main() -> None:
             f"benchmark_{bench_col}: return={float(bench['total_return_pct']):.2f}% "
             f"trades={int(bench['trades'])} "
             f"win_rate={float(bench['win_rate_pct']):.2f}% "
-            f"mdd={float(bench['max_drawdown_pct']):.2f}%"
+            f"mdd={float(bench['max_drawdown_pct']):.2f}% "
+            f"thr={bench_thresholds.get(bench_col, score_threshold):.2f}"
         )
 
 
