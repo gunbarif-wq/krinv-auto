@@ -6,7 +6,7 @@ import json
 import pickle
 from pathlib import Path
 from typing import Dict, List, Tuple
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import numpy as np
 
@@ -200,12 +200,8 @@ def main() -> None:
             atr_down_mult=args.atr_down_mult,
             atr_floor_pct=args.atr_floor_pct,
         )
-    # Default range: full available feature timeline.
-    cli_start = parse_dt_opt(args.start_datetime)
-    cli_end = parse_dt_opt(args.end_datetime)
-    rows = filter_rows_by_range(rows, cli_start, cli_end)
     if not rows:
-        raise RuntimeError("no rows after applying datetime range")
+        raise RuntimeError("no rows in feature dataset")
 
     x, close, dates, feature_series = rows_to_arrays(rows, feature_cols)
     prob = model.predict_proba(x)[:, 1]  # type: ignore[attr-defined]
@@ -247,8 +243,20 @@ def main() -> None:
         )
 
     n = close.shape[0]
-    # Keep 1-minute granularity for the selected range.
-    idx = np.arange(0, n, 1, dtype=int)
+    # Keep full-range simulation, but render only a recent window in HTML by default.
+    cli_start = parse_dt_opt(args.start_datetime)
+    cli_end = parse_dt_opt(args.end_datetime)
+    if cli_start is None and cli_end is None and dates:
+        last_dt = datetime.strptime(dates[-1][:19], "%Y-%m-%d %H:%M:%S")
+        cli_end = last_dt
+        cli_start = last_dt - timedelta(days=30)
+    plot_rows = [{"date": d} for d in dates]
+    plot_rows = filter_rows_by_range(plot_rows, cli_start, cli_end)
+    if plot_rows:
+        keep = {r["date"] for r in plot_rows}
+        idx = np.asarray([i for i, d in enumerate(dates) if d in keep], dtype=int)
+    else:
+        idx = np.arange(0, n, 1, dtype=int)
     close_ds = close[idx]
 
     indicator_cols = [c.strip() for c in str(args.indicator_cols).split(",") if c.strip()]
@@ -273,6 +281,7 @@ def main() -> None:
     if price_csv:
         ohlc_map = load_price_ohlc(Path(price_csv))
     x_all = [dates[i] for i in idx]
+    x_all_set = set(x_all)
     has_candle = bool(ohlc_map)
     if has_candle:
         o_vals: List[float] = []
@@ -332,8 +341,12 @@ def main() -> None:
         entry_dt = [dates[min(max(0, i), len(dates) - 1)] for i in entry_i]
         exit_dt = [dates[min(max(0, i), len(dates) - 1)] for i in exit_i]
         for xdt in entry_dt:
+            if xdt not in x_all_set:
+                continue
             pfig.add_vline(x=xdt, line_width=1, line_color="#2ca02c", opacity=0.5, row=1, col=1)
         for xdt in exit_dt:
+            if xdt not in x_all_set:
+                continue
             pfig.add_vline(x=xdt, line_width=1, line_color="#d62728", opacity=0.5, row=1, col=1)
         pfig.add_trace(
             go.Scatter(x=[None], y=[None], mode="lines", name="buy", line=dict(color="#2ca02c", width=1)),
