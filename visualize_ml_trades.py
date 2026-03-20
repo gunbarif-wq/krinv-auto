@@ -6,6 +6,7 @@ import json
 import pickle
 from pathlib import Path
 from typing import Dict, List, Tuple
+from datetime import datetime, timedelta
 
 import numpy as np
 
@@ -27,12 +28,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--atr-up-mult", type=float, default=2.0)
     p.add_argument("--atr-down-mult", type=float, default=1.2)
     p.add_argument("--atr-floor-pct", type=float, default=0.003)
-    p.add_argument("--threshold", type=float, default=0.60)
+    p.add_argument("--threshold", type=float, default=0.80)
     p.add_argument("--fee-roundtrip", type=float, default=0.0004)
     p.add_argument("--indicator-cols", default="rsi14,momentum_20", help="comma separated feature columns to plot below price")
     p.add_argument("--indicator-mode", default="local_rank01", choices=["raw01", "local_rank01"])
     p.add_argument("--indicator-window", type=int, default=120, help="window for local_rank01")
-    p.add_argument("--score-threshold", type=float, default=0.60, help="0..1 threshold line on indicator panel")
+    p.add_argument("--score-threshold", type=float, default=0.80, help="0..1 threshold line on indicator panel")
     p.add_argument("--hold-bars", type=int, default=16)
     p.add_argument("--take-profit-pct", type=float, default=0.020)
     p.add_argument("--stop-loss-pct", type=float, default=0.005)
@@ -47,7 +48,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--loss-streak-for-cooldown", type=int, default=0)
     p.add_argument("--cooldown-bars", type=int, default=0)
     p.add_argument("--initial-cash", type=float, default=10_000_000)
-    p.add_argument("--max-points", type=int, default=6000, help="downsample for plotting if too large")
+    p.add_argument("--start-datetime", default="", help="inclusive, e.g. 2026-03-01 or 2026-03-01 09:00:00")
+    p.add_argument("--end-datetime", default="", help="inclusive, e.g. 2026-03-14 or 2026-03-14 15:30:00")
     return p.parse_args()
 
 
@@ -132,6 +134,45 @@ def normalize_indicator(arr: np.ndarray, mode: str, window: int) -> np.ndarray:
     return robust_minmax_01(arr)
 
 
+def parse_dt_opt(s: str) -> datetime | None:
+    t = str(s).strip()
+    if not t:
+        return None
+    fmts = ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d")
+    for f in fmts:
+        try:
+            return datetime.strptime(t, f)
+        except ValueError:
+            continue
+    raise RuntimeError(f"invalid datetime format: {s}")
+
+
+def filter_rows_by_range(
+    rows: List[Dict[str, str]],
+    start_dt: datetime | None,
+    end_dt: datetime | None,
+) -> List[Dict[str, str]]:
+    if not rows:
+        return rows
+    if start_dt is None and end_dt is None:
+        return rows
+    out: List[Dict[str, str]] = []
+    for r in rows:
+        dt_s = str(r.get("date", ""))
+        if len(dt_s) < 19:
+            continue
+        try:
+            dt = datetime.strptime(dt_s[:19], "%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            continue
+        if start_dt is not None and dt < start_dt:
+            continue
+        if end_dt is not None and dt > end_dt:
+            continue
+        out.append(r)
+    return out
+
+
 def main() -> None:
     args = parse_args()
     with Path(args.model_path).open("rb") as f:
@@ -155,6 +196,19 @@ def main() -> None:
             atr_down_mult=args.atr_down_mult,
             atr_floor_pct=args.atr_floor_pct,
         )
+    # Default range: last 2 weeks in the available feature timeline.
+    cli_start = parse_dt_opt(args.start_datetime)
+    cli_end = parse_dt_opt(args.end_datetime)
+    if cli_start is None and cli_end is None and rows:
+        last_s = str(rows[-1].get("date", ""))
+        if len(last_s) >= 19:
+            last_dt = datetime.strptime(last_s[:19], "%Y-%m-%d %H:%M:%S")
+            cli_end = last_dt
+            cli_start = last_dt - timedelta(days=14)
+    rows = filter_rows_by_range(rows, cli_start, cli_end)
+    if not rows:
+        raise RuntimeError("no rows after applying datetime range")
+
     x, close, dates, feature_series = rows_to_arrays(rows, feature_cols)
     prob = model.predict_proba(x)[:, 1]  # type: ignore[attr-defined]
     cfg = PolicyConfig(
@@ -178,8 +232,8 @@ def main() -> None:
     trade_logs = json.loads(str(result.get("trade_logs", "[]")))
 
     n = close.shape[0]
-    step = max(1, int(np.ceil(n / max(1, int(args.max_points)))))
-    idx = np.arange(0, n, step, dtype=int)
+    # Keep 1-minute granularity for the selected range.
+    idx = np.arange(0, n, 1, dtype=int)
     close_ds = close[idx]
 
     indicator_cols = [c.strip() for c in str(args.indicator_cols).split(",") if c.strip()]
@@ -260,10 +314,8 @@ def main() -> None:
     if trade_logs:
         entry_i = np.asarray([int(t["entry_i"]) for t in trade_logs], dtype=int)
         exit_i = np.asarray([int(t["exit_i"]) for t in trade_logs], dtype=int)
-        entry_x = entry_i // step
-        exit_x = exit_i // step
-        entry_dt = [dates[min(i * step, len(dates) - 1)] for i in entry_x]
-        exit_dt = [dates[min(i * step, len(dates) - 1)] for i in exit_x]
+        entry_dt = [dates[min(max(0, i), len(dates) - 1)] for i in entry_i]
+        exit_dt = [dates[min(max(0, i), len(dates) - 1)] for i in exit_i]
         for xdt in entry_dt:
             pfig.add_vline(x=xdt, line_width=1, line_color="#2ca02c", opacity=0.5, row=1, col=1)
         for xdt in exit_dt:

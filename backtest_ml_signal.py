@@ -15,7 +15,7 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Backtest ML signal on prepared feature dataset")
     p.add_argument("--dataset-csv", default="data/ml/047810/047810_full_ml.csv")
     p.add_argument("--model-path", default="data/ml/047810/047810_model.pkl")
-    p.add_argument("--threshold", type=float, default=0.60, help="override model threshold")
+    p.add_argument("--threshold", type=float, default=0.80, help="override model threshold")
     p.add_argument("--fee-roundtrip", type=float, default=0.0004, help="override model fee")
     p.add_argument("--hold-bars", type=int, default=16, help="non-overlap holding bars")
     p.add_argument("--entry-start-hhmm", type=int, default=900)
