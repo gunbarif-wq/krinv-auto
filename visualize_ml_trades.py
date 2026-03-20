@@ -6,7 +6,7 @@ import json
 import pickle
 from pathlib import Path
 from typing import Dict, List, Tuple
-from datetime import datetime, timedelta
+from datetime import datetime
 
 import numpy as np
 
@@ -28,8 +28,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--atr-up-mult", type=float, default=2.0)
     p.add_argument("--atr-down-mult", type=float, default=1.2)
     p.add_argument("--atr-floor-pct", type=float, default=0.003)
-    p.add_argument("--threshold", type=float, default=0.80)
-    p.add_argument("--fee-roundtrip", type=float, default=0.004)
+    p.add_argument("--threshold", type=float, default=0.80, help="entry threshold (default tuned policy: 0.80)")
+    p.add_argument("--fee-roundtrip", type=float, default=0.001, help="roundtrip fee (default tuned policy: 0.001)")
     p.add_argument(
         "--indicator-cols",
         default="macd_plus,slow_k14_3",
@@ -38,19 +38,19 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--indicator-mode", default="local_rank01", choices=["raw01", "local_rank01"])
     p.add_argument("--indicator-window", type=int, default=120, help="window for local_rank01")
     p.add_argument("--score-threshold", type=float, default=0.80, help="0..1 threshold line on indicator panel")
-    p.add_argument("--hold-bars", type=int, default=16)
-    p.add_argument("--take-profit-pct", type=float, default=0.020)
-    p.add_argument("--stop-loss-pct", type=float, default=0.005)
-    p.add_argument("--trailing-stop-pct", type=float, default=0.004)
+    p.add_argument("--hold-bars", type=int, default=20)
+    p.add_argument("--take-profit-pct", type=float, default=0.0)
+    p.add_argument("--stop-loss-pct", type=float, default=0.0)
+    p.add_argument("--trailing-stop-pct", type=float, default=0.0)
     p.add_argument("--max-concurrent-positions", type=int, default=1)
-    p.add_argument("--position-size-pct", type=float, default=0.25)
-    p.add_argument("--min-entry-gap-bars", type=int, default=2)
+    p.add_argument("--position-size-pct", type=float, default=1.0)
+    p.add_argument("--min-entry-gap-bars", type=int, default=1)
     p.add_argument("--entry-start-hhmm", type=int, default=900)
     p.add_argument("--entry-end-hhmm", type=int, default=1530)
     p.add_argument("--skip-open-min", type=int, default=0)
-    p.add_argument("--skip-close-min", type=int, default=0)
-    p.add_argument("--loss-streak-for-cooldown", type=int, default=0)
-    p.add_argument("--cooldown-bars", type=int, default=0)
+    p.add_argument("--skip-close-min", type=int, default=10)
+    p.add_argument("--loss-streak-for-cooldown", type=int, default=1)
+    p.add_argument("--cooldown-bars", type=int, default=30)
     p.add_argument("--initial-cash", type=float, default=10_000_000)
     p.add_argument("--start-datetime", default="", help="inclusive, e.g. 2026-03-01 or 2026-03-01 09:00:00")
     p.add_argument("--end-datetime", default="", help="inclusive, e.g. 2026-03-14 or 2026-03-14 15:30:00")
@@ -183,7 +183,7 @@ def main() -> None:
         bundle = pickle.load(f)
     model = bundle["model"]
     feature_cols: List[str] = bundle["feature_columns"]
-    threshold = float(args.threshold if args.threshold is not None else bundle.get("threshold", 0.7))
+    threshold = float(args.threshold if args.threshold is not None else bundle.get("threshold", 0.8))
     fee = float(args.fee_roundtrip if args.fee_roundtrip is not None else bundle.get("fee_roundtrip", 0.001))
 
     if str(args.feature_csv).strip():
@@ -200,15 +200,9 @@ def main() -> None:
             atr_down_mult=args.atr_down_mult,
             atr_floor_pct=args.atr_floor_pct,
         )
-    # Default range: last 2 weeks in the available feature timeline.
+    # Default range: full available feature timeline.
     cli_start = parse_dt_opt(args.start_datetime)
     cli_end = parse_dt_opt(args.end_datetime)
-    if cli_start is None and cli_end is None and rows:
-        last_s = str(rows[-1].get("date", ""))
-        if len(last_s) >= 19:
-            last_dt = datetime.strptime(last_s[:19], "%Y-%m-%d %H:%M:%S")
-            cli_end = last_dt
-            cli_start = last_dt - timedelta(days=14)
     rows = filter_rows_by_range(rows, cli_start, cli_end)
     if not rows:
         raise RuntimeError("no rows after applying datetime range")
@@ -234,6 +228,23 @@ def main() -> None:
     )
     result = run_policy(prob=prob, close=close, dates=dates, cfg=cfg, initial_cash=float(args.initial_cash), return_trades=True)
     trade_logs = json.loads(str(result.get("trade_logs", "[]")))
+    score_threshold = float(args.score_threshold) if args.score_threshold is not None else threshold
+    score_threshold = float(np.clip(score_threshold, 0.0, 1.0))
+
+    bench_results: Dict[str, Dict[str, float | int | str | None]] = {}
+    for bench_col in ("macd_plus", "slow_k14_3"):
+        if bench_col not in feature_series:
+            continue
+        bench_score = normalize_indicator(feature_series[bench_col], args.indicator_mode, args.indicator_window)
+        bench_prob = np.where(bench_score >= score_threshold, 1.0, 0.0)
+        bench_results[bench_col] = run_policy(
+            prob=bench_prob,
+            close=close,
+            dates=dates,
+            cfg=cfg,
+            initial_cash=float(args.initial_cash),
+            return_trades=False,
+        )
 
     n = close.shape[0]
     # Keep 1-minute granularity for the selected range.
@@ -349,9 +360,9 @@ def main() -> None:
     pfig.add_trace(
         go.Scatter(
             x=x_all,
-            y=np.full(prob_ds.shape[0], float(np.clip(args.score_threshold, 0.0, 1.0)), dtype=float),
+            y=np.full(prob_ds.shape[0], score_threshold, dtype=float),
             mode="lines",
-            name=f"threshold={float(np.clip(args.score_threshold,0.0,1.0)):.2f}",
+            name=f"threshold={score_threshold:.2f}",
             line=dict(width=1.0, dash="dash"),
         ),
         row=2,
@@ -392,6 +403,17 @@ def main() -> None:
         f"return={float(result['total_return_pct']):.2f}% trades={int(result['trades'])} "
         f"win_rate={float(result['win_rate_pct']):.2f}% mdd={float(result['max_drawdown_pct']):.2f}%"
     )
+    for bench_col in ("macd_plus", "slow_k14_3"):
+        bench = bench_results.get(bench_col)
+        if bench is None:
+            print(f"benchmark_{bench_col}: skipped (column not found)")
+            continue
+        print(
+            f"benchmark_{bench_col}: return={float(bench['total_return_pct']):.2f}% "
+            f"trades={int(bench['trades'])} "
+            f"win_rate={float(bench['win_rate_pct']):.2f}% "
+            f"mdd={float(bench['max_drawdown_pct']):.2f}%"
+        )
 
 
 if __name__ == "__main__":

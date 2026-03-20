@@ -15,8 +15,8 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Backtest ML signal on prepared feature dataset")
     p.add_argument("--dataset-csv", default="data/ml/225190/225190_full_ml.csv")
     p.add_argument("--model-path", default="data/ml/225190/225190_model.pkl")
-    p.add_argument("--threshold", type=float, default=0.80, help="override model threshold")
-    p.add_argument("--fee-roundtrip", type=float, default=0.004, help="override model fee")
+    p.add_argument("--threshold", type=float, default=0.80, help="entry threshold (default tuned policy: 0.80)")
+    p.add_argument("--fee-roundtrip", type=float, default=0.001, help="roundtrip fee (default tuned policy: 0.001)")
     p.add_argument("--hold-bars", type=int, default=20, help="non-overlap holding bars")
     p.add_argument("--entry-start-hhmm", type=int, default=900)
     p.add_argument("--entry-end-hhmm", type=int, default=1530)
@@ -308,8 +308,8 @@ def main() -> None:
 
     model = bundle["model"]
     feature_cols: List[str] = bundle["feature_columns"]
-    threshold = float(args.threshold if args.threshold is not None else bundle.get("threshold", 0.60))
-    fee = float(args.fee_roundtrip if args.fee_roundtrip is not None else bundle.get("fee_roundtrip", 0.0004))
+    threshold = float(args.threshold if args.threshold is not None else bundle.get("threshold", 0.80))
+    fee = float(args.fee_roundtrip if args.fee_roundtrip is not None else bundle.get("fee_roundtrip", 0.001))
 
     X, close, dates = load_dataset(Path(args.dataset_csv), feature_cols)
     prob = model.predict_proba(X)[:, 1]

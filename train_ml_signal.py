@@ -30,7 +30,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--atr-down-mult", type=float, default=1.2)
     p.add_argument("--atr-floor-pct", type=float, default=0.003)
     p.add_argument("--symbol", default="225190")
-    p.add_argument("--model-kind", default="logistic", choices=["logistic", "gboost"])
+    p.add_argument("--model-kind", default="gboost", choices=["logistic", "gboost"])
     p.add_argument("--feature-mode", default="trio", choices=["all", "trio"])
     p.add_argument("--fee-roundtrip", type=float, default=0.004)
     p.add_argument("--min-trades", type=int, default=20)
