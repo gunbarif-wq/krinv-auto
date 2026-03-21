@@ -14,13 +14,13 @@ import numpy as np
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Backtest ML signal on prepared feature dataset")
     p.add_argument("--dataset-csv", default="data/ml/225190/225190_full_ml.csv")
-    p.add_argument("--model-path", default="data/ml/225190/225190_model.pkl")
+    p.add_argument("--model-path", default="data/ml/225190/225190_model_up3_dn15.pkl")
     p.add_argument("--threshold", type=float, default=0.80, help="entry threshold (default tuned policy: 0.80)")
     p.add_argument("--fee-roundtrip", type=float, default=0.001, help="roundtrip fee (default tuned policy: 0.001)")
     p.add_argument("--hold-bars", type=int, default=20, help="non-overlap holding bars")
     p.add_argument("--entry-start-hhmm", type=int, default=900)
     p.add_argument("--entry-end-hhmm", type=int, default=1530)
-    p.add_argument("--skip-open-min", type=int, default=0, help="skip first N minutes after 09:00")
+    p.add_argument("--skip-open-min", type=int, default=10, help="skip first N minutes after 09:00")
     p.add_argument("--skip-close-min", type=int, default=10, help="skip last N minutes before 15:30")
     p.add_argument("--loss-streak-for-cooldown", type=int, default=1, help="activate cooldown after N consecutive losses")
     p.add_argument("--cooldown-bars", type=int, default=30, help="cooldown bars after loss streak trigger")
@@ -34,7 +34,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--bench-rsi-buy-max", type=float, default=0.15, help="RSI-only benchmark entry: rsi14 <= this")
     p.add_argument("--bench-mom-buy-min", type=float, default=0.02, help="Momentum-only benchmark entry: momentum_20 >= this")
     p.add_argument("--initial-cash", type=float, default=10_000_000)
-    p.add_argument("--report-out", default="data/ml/225190/225190_test_backtest.json")
+    p.add_argument("--report-out", default="data/ml/225190/225190_test_backtest_up3_dn15.json")
     return p.parse_args()
 
 
@@ -123,6 +123,23 @@ def in_entry_window(dt: str, cfg: PolicyConfig) -> bool:
     return True
 
 
+def is_eod_flatten_bar(i: int, dates: List[str], cfg: PolicyConfig) -> bool:
+    dt = dates[i]
+    hhmm = hhmm_from_date_str(dt)
+    if hhmm >= 0:
+        close_total = 15 * 60 + 30
+        cut_total = max(9 * 60, close_total - max(0, int(cfg.skip_close_min)))
+        cut_hhmm = (cut_total // 60) * 100 + (cut_total % 60)
+        if hhmm >= cut_hhmm:
+            return True
+    if i + 1 < len(dates):
+        d0 = dt[:10] if len(dt) >= 10 else ""
+        d1 = dates[i + 1][:10] if len(dates[i + 1]) >= 10 else ""
+        if d0 and d1 and d0 != d1:
+            return True
+    return False
+
+
 def run_policy(
     prob: np.ndarray,
     close: np.ndarray,
@@ -170,6 +187,8 @@ def run_policy(
                 exit_reason = "take_profit"
             elif cfg.trailing_stop_pct > 0 and dd_from_peak <= -cfg.trailing_stop_pct:
                 exit_reason = "trailing_stop"
+            elif is_eod_flatten_bar(i, dates, cfg):
+                exit_reason = "eod_flatten"
             elif i >= pos.planned_exit_i:
                 exit_reason = "timeout"
 

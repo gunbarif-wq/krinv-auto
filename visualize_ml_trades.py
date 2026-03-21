@@ -19,12 +19,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--raw-csv", default="data/backtest_sets_225190_1y/full_1m/225190_1m_full.csv")
     p.add_argument("--feature-csv", default="", help="prebuilt ML feature csv (date,close,feature...,label,fwd_close_ret)")
     p.add_argument("--price-csv", default="", help="OHLCV csv for candlestick (default: --raw-csv)")
-    p.add_argument("--model-path", default="data/ml/225190/225190_model.pkl")
-    p.add_argument("--interactive-html", default="data/ml/225190/225190_trade_plot_full.html")
+    p.add_argument("--model-path", default="data/ml/225190/225190_model_up3_dn15.pkl")
+    p.add_argument("--interactive-html", default="data/ml/225190/225190_trade_plot_up3_dn15.html")
     p.add_argument("--horizon-bars", type=int, default=30)
     p.add_argument("--label-mode", default="fixed", choices=["fixed", "atr"])
-    p.add_argument("--up-threshold", type=float, default=0.012)
-    p.add_argument("--down-threshold", type=float, default=0.007)
+    p.add_argument("--up-threshold", type=float, default=0.03)
+    p.add_argument("--down-threshold", type=float, default=0.015)
     p.add_argument("--atr-up-mult", type=float, default=2.0)
     p.add_argument("--atr-down-mult", type=float, default=1.2)
     p.add_argument("--atr-floor-pct", type=float, default=0.003)
@@ -38,8 +38,6 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--indicator-mode", default="local_rank01", choices=["raw01", "local_rank01"])
     p.add_argument("--indicator-window", type=int, default=120, help="window for local_rank01")
     p.add_argument("--score-threshold", type=float, default=None, help="0..1 threshold line (default: use strategy threshold)")
-    p.add_argument("--bench-macd-threshold", type=float, default=0.4, help="benchmark threshold for macd_plus (0..1)")
-    p.add_argument("--bench-slowk-threshold", type=float, default=0.35, help="benchmark threshold for slow_k14_3 (0..1)")
     p.add_argument("--hold-bars", type=int, default=20)
     p.add_argument("--take-profit-pct", type=float, default=0.0)
     p.add_argument("--stop-loss-pct", type=float, default=0.0)
@@ -49,7 +47,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--min-entry-gap-bars", type=int, default=1)
     p.add_argument("--entry-start-hhmm", type=int, default=900)
     p.add_argument("--entry-end-hhmm", type=int, default=1530)
-    p.add_argument("--skip-open-min", type=int, default=0)
+    p.add_argument("--skip-open-min", type=int, default=10)
     p.add_argument("--skip-close-min", type=int, default=10)
     p.add_argument("--loss-streak-for-cooldown", type=int, default=1)
     p.add_argument("--cooldown-bars", type=int, default=30)
@@ -206,7 +204,8 @@ def main() -> None:
         raise RuntimeError("no rows in feature dataset")
 
     x, close, dates, feature_series = rows_to_arrays(rows, feature_cols)
-    prob = model.predict_proba(x)[:, 1]  # type: ignore[attr-defined]
+    prob_raw = model.predict_proba(x)[:, 1]  # type: ignore[attr-defined]
+    prob_for_policy = normalize_indicator(prob_raw, args.indicator_mode, args.indicator_window)
     cfg = PolicyConfig(
         threshold=threshold,
         fee_roundtrip=fee,
@@ -224,34 +223,11 @@ def main() -> None:
         position_size_pct=min(1.0, max(0.01, float(args.position_size_pct))),
         min_entry_gap_bars=max(1, int(args.min_entry_gap_bars)),
     )
-    result = run_policy(prob=prob, close=close, dates=dates, cfg=cfg, initial_cash=float(args.initial_cash), return_trades=True)
+    result = run_policy(prob=prob_for_policy, close=close, dates=dates, cfg=cfg, initial_cash=float(args.initial_cash), return_trades=True)
     trade_logs = json.loads(str(result.get("trade_logs", "[]")))
     score_threshold = float(args.score_threshold) if args.score_threshold is not None else threshold
     score_threshold = float(np.clip(score_threshold, 0.0, 1.0))
 
-    bench_results: Dict[str, Dict[str, float | int | str | None]] = {}
-    bench_thresholds = {
-        "macd_plus": float(np.clip(args.bench_macd_threshold, 0.0, 1.0))
-        if args.bench_macd_threshold is not None
-        else score_threshold,
-        "slow_k14_3": float(np.clip(args.bench_slowk_threshold, 0.0, 1.0))
-        if args.bench_slowk_threshold is not None
-        else score_threshold,
-    }
-    for bench_col in ("macd_plus", "slow_k14_3"):
-        if bench_col not in feature_series:
-            continue
-        bench_score = normalize_indicator(feature_series[bench_col], args.indicator_mode, args.indicator_window)
-        bench_thr = bench_thresholds.get(bench_col, score_threshold)
-        bench_prob = np.where(bench_score >= bench_thr, 1.0, 0.0)
-        bench_results[bench_col] = run_policy(
-            prob=bench_prob,
-            close=close,
-            dates=dates,
-            cfg=cfg,
-            initial_cash=float(args.initial_cash),
-            return_trades=False,
-        )
 
     n = close.shape[0]
     # Keep full-range simulation, but render only a recent window in HTML by default.
@@ -279,7 +255,7 @@ def main() -> None:
         f"trades={int(result['trades'])} win={float(result['win_rate_pct']):.1f}%"
     )
 
-    prob_ds = prob[idx]
+    prob_ds = prob_for_policy[idx]
     try:
         import plotly.graph_objects as go
         from plotly.subplots import make_subplots
@@ -374,7 +350,7 @@ def main() -> None:
             x=x_all,
             y=prob_ds,
             mode="lines",
-            name="model_prob",
+            name="model_score",
             line=dict(width=1.2),
         ),
         row=2,
@@ -387,6 +363,7 @@ def main() -> None:
             mode="lines",
             name=f"threshold={score_threshold:.2f}",
             line=dict(width=1.0, dash="dash"),
+            visible="legendonly",
         ),
         row=2,
         col=1,
@@ -402,6 +379,7 @@ def main() -> None:
                 name=c,
                 line=dict(width=1.0),
                 opacity=0.9,
+                visible="legendonly",
             ),
             row=2,
             col=1,
@@ -426,19 +404,5 @@ def main() -> None:
         f"return={float(result['total_return_pct']):.2f}% trades={int(result['trades'])} "
         f"win_rate={float(result['win_rate_pct']):.2f}% mdd={float(result['max_drawdown_pct']):.2f}%"
     )
-    for bench_col in ("macd_plus", "slow_k14_3"):
-        bench = bench_results.get(bench_col)
-        if bench is None:
-            print(f"benchmark_{bench_col}: skipped (column not found)")
-            continue
-        print(
-            f"benchmark_{bench_col}: return={float(bench['total_return_pct']):.2f}% "
-            f"trades={int(bench['trades'])} "
-            f"win_rate={float(bench['win_rate_pct']):.2f}% "
-            f"mdd={float(bench['max_drawdown_pct']):.2f}% "
-            f"thr={bench_thresholds.get(bench_col, score_threshold):.2f}"
-        )
-
-
 if __name__ == "__main__":
     main()

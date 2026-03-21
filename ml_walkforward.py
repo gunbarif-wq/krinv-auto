@@ -58,7 +58,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--threshold", type=float, default=0.80)
     p.add_argument("--hold-bars", type=int, default=20)
-    p.add_argument("--skip-open-min", type=int, default=0)
+    p.add_argument("--skip-open-min", type=int, default=10)
     p.add_argument("--skip-close-min", type=int, default=10)
     p.add_argument("--loss-streak-for-cooldown", type=int, default=1)
     p.add_argument("--cooldown-bars", type=int, default=30)

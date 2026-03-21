@@ -24,20 +24,21 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--val-ratio", type=float, default=0.15)
     p.add_argument("--horizon-bars", type=int, default=30)
     p.add_argument("--label-mode", default="fixed", choices=["fixed", "atr"])
-    p.add_argument("--up-threshold", type=float, default=0.012)
-    p.add_argument("--down-threshold", type=float, default=0.007)
+    p.add_argument("--up-threshold", type=float, default=0.03)
+    p.add_argument("--down-threshold", type=float, default=0.015)
     p.add_argument("--atr-up-mult", type=float, default=2.0)
     p.add_argument("--atr-down-mult", type=float, default=1.2)
     p.add_argument("--atr-floor-pct", type=float, default=0.003)
     p.add_argument("--symbol", default="225190")
-    p.add_argument("--model-kind", default="gboost", choices=["logistic", "gboost"])
+    p.add_argument("--model-kind", default="logistic", choices=["logistic", "gboost"])
+    p.add_argument("--logreg-c", type=float, default=10.0, help="inverse regularization strength for logistic")
     p.add_argument("--fee-roundtrip", type=float, default=0.004)
     p.add_argument("--min-trades", type=int, default=20)
     p.add_argument("--thr-start", type=float, default=0.50)
     p.add_argument("--thr-end", type=float, default=0.95)
     p.add_argument("--thr-step", type=float, default=0.01)
-    p.add_argument("--model-out", default="data/ml/225190/225190_model.pkl")
-    p.add_argument("--report-out", default="data/ml/225190/225190_train_report.json")
+    p.add_argument("--model-out", default="data/ml/225190/225190_model_up3_dn15.pkl")
+    p.add_argument("--report-out", default="data/ml/225190/225190_train_report_up3_dn15.json")
     return p.parse_args()
 
 
@@ -186,6 +187,8 @@ def extract_formula_if_logistic(model: object, feature_columns: List[str]) -> Di
     if not isinstance(clf, LogisticRegression) or not isinstance(scaler, StandardScaler):
         return None
     coefs = clf.coef_[0].tolist()
+    l1 = float(np.sum(np.abs(coefs)))
+    l1 = l1 if l1 > 1e-12 else 1.0
     intercept = float(clf.intercept_[0])
     terms: List[Dict[str, float | str]] = []
     for name, w, mu, sigma in zip(feature_columns, coefs, scaler.mean_.tolist(), scaler.scale_.tolist()):
@@ -193,6 +196,8 @@ def extract_formula_if_logistic(model: object, feature_columns: List[str]) -> Di
             {
                 "feature": name,
                 "coef_on_z": float(w),
+                "coef_l1_norm": float(w / l1),
+                "coef_abs_share": float(abs(w) / l1),
                 "mean": float(mu),
                 "std": float(sigma if sigma > 0 else 1.0),
             }
@@ -203,6 +208,29 @@ def extract_formula_if_logistic(model: object, feature_columns: List[str]) -> Di
         "intercept": intercept,
         "terms": terms,
     }
+
+
+def print_model_weights(model: object, model_kind: str, feature_columns: List[str]) -> None:
+    if model_kind == "logistic" and isinstance(model, Pipeline):
+        clf = model.named_steps.get("clf")
+        if isinstance(clf, LogisticRegression):
+            print(f"intercept={float(clf.intercept_[0]):.10f}")
+            coefs = clf.coef_[0].tolist()
+            l1 = float(np.sum(np.abs(coefs)))
+            l1 = l1 if l1 > 1e-12 else 1.0
+            weights = sorted(zip(feature_columns, coefs), key=lambda x: abs(x[1]), reverse=True)
+            print("weights(coef_on_z, coef_l1_norm, abs_share):")
+            for name, coef in weights:
+                coef_norm = coef / l1
+                abs_share = abs(coef) / l1
+                print(f"{name}: {coef:.10f}, {coef_norm:.10f}, {abs_share:.10f}")
+            return
+    if model_kind == "gboost" and isinstance(model, GradientBoostingClassifier):
+        imp = model.feature_importances_.tolist()
+        weights = sorted(zip(feature_columns, imp), key=lambda x: x[1], reverse=True)
+        print("feature_importance:")
+        for name, score in weights:
+            print(f"{name}: {score:.10f}")
 
 
 def main() -> None:
@@ -262,7 +290,7 @@ def main() -> None:
                     LogisticRegression(
                         max_iter=2000,
                         class_weight="balanced",
-                        C=0.5,
+                        C=max(1e-6, float(args.logreg_c)),
                         solver="lbfgs",
                         random_state=42,
                     ),
@@ -346,6 +374,7 @@ def main() -> None:
         f"{thr:.2f} val_expected_net_ret={val_eval['expected_net_ret']*100:.4f}% "
         f"test_expected_net_ret={test_eval['expected_net_ret']*100:.4f}%"
     )
+    print_model_weights(model=model, model_kind=args.model_kind, feature_columns=feature_columns)
 
 
 if __name__ == "__main__":
