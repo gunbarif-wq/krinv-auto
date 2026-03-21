@@ -32,12 +32,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--fee-roundtrip", type=float, default=0.001, help="roundtrip fee (default tuned policy: 0.001)")
     p.add_argument(
         "--indicator-cols",
-        default="macd_plus,slow_k14_3",
+        default="ema_spread_3_8,rsi_5,distance_to_vwap",
         help="comma separated feature columns to plot below price",
     )
     p.add_argument("--indicator-mode", default="local_rank01", choices=["raw01", "local_rank01"])
     p.add_argument("--indicator-window", type=int, default=120, help="window for local_rank01")
-    p.add_argument("--score-threshold", type=float, default=0.80, help="0..1 threshold line on indicator panel")
+    p.add_argument("--score-threshold", type=float, default=None, help="0..1 threshold line (default: use strategy threshold)")
     p.add_argument("--bench-macd-threshold", type=float, default=0.4, help="benchmark threshold for macd_plus (0..1)")
     p.add_argument("--bench-slowk-threshold", type=float, default=0.35, help="benchmark threshold for slow_k14_3 (0..1)")
     p.add_argument("--hold-bars", type=int, default=20)

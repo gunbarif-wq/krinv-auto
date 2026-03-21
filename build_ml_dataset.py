@@ -48,15 +48,16 @@ FEATURE_COLUMNS = [
     "day_ret_open",
     "day_range_pos",
     "vwap_gap_day",
+    "ema_spread_3_8",
+    "rsi_5",
+    "distance_to_vwap",
     "minute_norm",
 ]
 
-TRIO_FEATURE_COLUMNS = [
-    "ma_gap_5_20",
-    "ma_gap_10_20",
-    "ma_gap_20_60",
-    "macd_plus",
-    "slow_k14_3",
+DEFAULT_MODEL_FEATURE_COLUMNS = [
+    "ema_spread_3_8",
+    "rsi_5",
+    "distance_to_vwap",
 ]
 
 
@@ -329,6 +330,10 @@ def build_rows(
     price_z60 = safe_div(c - ma60, close_std60)
     momentum_20 = ret_20.copy()
     rsi14 = safe_div(rsi_vec(c, 14), np.full(n, 100.0))  # normalize to 0..1
+    ema3 = ema_vec(c, 3)
+    ema8 = ema_vec(c, 8)
+    ema_spread_3_8 = ema3 - ema8
+    rsi_5 = safe_div(rsi_vec(c, 5), np.full(n, 100.0))
     prev_close = np.roll(c, 1)
     tr = np.maximum.reduce([h - l, np.abs(h - prev_close), np.abs(l - prev_close)])
     atr14 = rolling_mean(tr, 14)
@@ -339,6 +344,7 @@ def build_rows(
     day_range = intra["day_high_so_far"] - intra["day_low_so_far"]
     day_range_pos = safe_div(c - intra["day_low_so_far"], day_range)
     vwap_gap_day = safe_div(c - intra["vwap_day"], intra["vwap_day"])
+    distance_to_vwap = vwap_gap_day.copy()
     minute_norm = minute_norm_vec(dates)  # type: ignore[arg-type]
 
     start = 60
@@ -385,6 +391,9 @@ def build_rows(
                 day_ret_open[i],
                 day_range_pos[i],
                 vwap_gap_day[i],
+                ema_spread_3_8[i],
+                rsi_5[i],
+                distance_to_vwap[i],
                 minute_norm[i],
             ],
             dtype=float,
