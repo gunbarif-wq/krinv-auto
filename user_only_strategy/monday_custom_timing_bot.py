@@ -277,54 +277,6 @@ def fetch_candidate_universe(
     return [(sym, names.get(sym, "")) for sym, _ in ranked]
 
 
-def fetch_daily_ohlcv(
-    base_url: str,
-    token: str,
-    app_key: str,
-    app_secret: str,
-    symbol: str,
-    lookback_days: int = 200,
-) -> List[Dict[str, float]]:
-    end = datetime.now(KST).strftime("%Y%m%d")
-    start = (datetime.now(KST) - timedelta(days=max(lookback_days, 80) * 2)).strftime("%Y%m%d")
-    url = f"{base_url}/uapi/domestic-stock/v1/quotations/inquire-daily-itemchartprice"
-    headers = {
-        "authorization": f"Bearer {token}",
-        "appKey": app_key,
-        "appSecret": app_secret,
-        "tr_id": "FHKST03010100",
-    }
-    params = {
-        "FID_COND_MRKT_DIV_CODE": "J",
-        "FID_INPUT_ISCD": symbol,
-        "FID_INPUT_DATE_1": start,
-        "FID_INPUT_DATE_2": end,
-        "FID_PERIOD_DIV_CODE": "D",
-        "FID_ORG_ADJ_PRC": "0",
-    }
-    data = request_json_with_retry("get", url, headers=headers, params=params, timeout=15, retries=3)
-    rows = data.get("output2", [])
-    out: List[Dict[str, float]] = []
-    if not isinstance(rows, list):
-        return out
-    for r in rows:
-        try:
-            out.append(
-                {
-                    "date": str(r.get("stck_bsop_date", "")),
-                    "open": float(r.get("stck_oprc", "0")),
-                    "high": float(r.get("stck_hgpr", "0")),
-                    "low": float(r.get("stck_lwpr", "0")),
-                    "close": float(r.get("stck_clpr", "0")),
-                    "volume": float(r.get("acml_vol", "0")),
-                }
-            )
-        except Exception:
-            continue
-    out.sort(key=lambda x: x["date"])
-    return out
-
-
 def fetch_minute_ohlcv(
     base_url: str,
     token: str,
@@ -507,7 +459,41 @@ class Candidate:
     ma60: float
 
 
-def daily_filter(
+def _parse_bar_datetime(v: float) -> datetime:
+    s = str(int(v)).zfill(14)
+    return datetime.strptime(s, "%Y%m%d%H%M%S")
+
+
+def resample_bars(rows: List[Dict[str, float]], bar_minutes: int) -> List[Dict[str, float]]:
+    if bar_minutes <= 1:
+        return rows
+    buckets: Dict[datetime, List[Dict[str, float]]] = {}
+    for r in rows:
+        dt = _parse_bar_datetime(float(r["date"]))
+        floor_min = (dt.minute // bar_minutes) * bar_minutes
+        key = dt.replace(minute=floor_min, second=0, microsecond=0)
+        buckets.setdefault(key, []).append(r)
+    out: List[Dict[str, float]] = []
+    for key in sorted(buckets.keys()):
+        g = buckets[key]
+        out.append(
+            {
+                "date": float(key.strftime("%Y%m%d%H%M%S")),
+                "open": float(g[0]["open"]),
+                "high": float(max(x["high"] for x in g)),
+                "low": float(min(x["low"] for x in g)),
+                "close": float(g[-1]["close"]),
+                "volume": float(sum(x["volume"] for x in g)),
+            }
+        )
+    return out
+
+
+def raw_count_hint_for_resampled_bars(target_bars: int, bar_minutes: int) -> int:
+    return max(180, int(target_bars) * max(1, int(bar_minutes)) + 30)
+
+
+def minute_filter(
     base_url: str,
     token: str,
     app_key: str,
@@ -516,14 +502,23 @@ def daily_filter(
     ma_converge_pct: float,
     ma60_no_break_days: int,
     ma20_support_days: int,
+    bar_minutes: int,
 ) -> List[Candidate]:
     selected: List[Candidate] = []
     for symbol, name in universe:
-        rows = fetch_daily_ohlcv(base_url, token, app_key, app_secret, symbol=symbol, lookback_days=220)
-        if len(rows) < 80:
+        rows = fetch_minute_ohlcv(
+            base_url=base_url,
+            token=token,
+            app_key=app_key,
+            app_secret=app_secret,
+            symbol=symbol,
+            count_hint=raw_count_hint_for_resampled_bars(90, bar_minutes),
+        )
+        bars = resample_bars(rows, bar_minutes=bar_minutes)
+        if len(bars) < 70:
             continue
-        close = np.asarray([r["close"] for r in rows], dtype=float)
-        low = np.asarray([r["low"] for r in rows], dtype=float)
+        close = np.asarray([r["close"] for r in bars], dtype=float)
+        low = np.asarray([r["low"] for r in bars], dtype=float)
         ma3 = sma(close, 3)
         ma5 = sma(close, 5)
         ma10 = sma(close, 10)
@@ -604,14 +599,17 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--cano", default=os.getenv("KIS_CANO", ""))
     p.add_argument("--acnt-prdt-cd", default=os.getenv("KIS_ACNT_PRDT_CD", "01"))
     p.add_argument("--dry-run", action="store_true", default=False)
-    p.add_argument("--force-run-anyday", action="store_true", default=False)
     p.add_argument("--max-universe", type=int, default=30)
     p.add_argument("--scan-interval-sec", type=int, default=60)
     p.add_argument("--max-cycles", type=int, default=200)
+    p.add_argument("--bar-minutes", type=int, choices=[1, 3, 5], default=5)
+    p.add_argument("--refresh-start-hhmm", type=int, default=800)
+    p.add_argument("--refresh-end-hhmm", type=int, default=2000)
+    p.add_argument("--refresh-interval-min", type=int, default=60)
     p.add_argument("--order-krw", type=float, default=300_000)
     p.add_argument("--ma-converge-pct", type=float, default=0.015)
-    p.add_argument("--ma60-no-break-days", type=int, default=5)
-    p.add_argument("--ma20-support-days", type=int, default=3)
+    p.add_argument("--ma60-no-break-days", type=int, default=5, help="minute bars count for no-break check")
+    p.add_argument("--ma20-support-days", type=int, default=3, help="minute bars count for MA20 support check")
     p.add_argument("--adx-min", type=float, default=20.0)
     p.add_argument("--log-file", default="logs/user_only_strategy_signals.txt")
     p.add_argument("--telegram-bot-token", default=os.getenv("TELEGRAM_BOT_TOKEN", ""))
@@ -622,6 +620,11 @@ def parse_args() -> argparse.Namespace:
 def in_korean_regular_session(now: datetime) -> bool:
     hhmm = now.hour * 100 + now.minute
     return now.weekday() < 5 and 900 <= hhmm <= 1530
+
+
+def in_refresh_window(now: datetime, start_hhmm: int, end_hhmm: int) -> bool:
+    hhmm = now.hour * 100 + now.minute
+    return now.weekday() < 5 and int(start_hhmm) <= hhmm <= int(end_hhmm)
 
 
 def buy_signal_from_minute_bars(rows: List[Dict[str, float]], adx_min: float) -> Tuple[bool, str]:
@@ -683,52 +686,59 @@ def main() -> None:
         raise RuntimeError("KIS_CANO and KIS_ACNT_PRDT_CD required for live order")
 
     notifier = Notifier(Path(args.log_file), args.telegram_bot_token, args.telegram_chat_id)
-    now = datetime.now(KST)
-    if now.weekday() != 0 and not args.force_run_anyday:
-        notifier.send("today is not Monday. skipped (use --force-run-anyday to override)")
-        return
-
     token = get_access_token(args.app_key, args.app_secret, base_url=args.base_url)
-    universe = fetch_candidate_universe(
-        base_url=args.base_url,
-        token=token,
-        app_key=args.app_key,
-        app_secret=args.app_secret,
-        max_universe=args.max_universe,
-    )
-    notifier.send(f"universe_candidates={len(universe)}")
-    filtered = daily_filter(
-        base_url=args.base_url,
-        token=token,
-        app_key=args.app_key,
-        app_secret=args.app_secret,
-        universe=universe,
-        ma_converge_pct=args.ma_converge_pct,
-        ma60_no_break_days=args.ma60_no_break_days,
-        ma20_support_days=args.ma20_support_days,
-    )
-    if not filtered:
-        notifier.send("no symbol passed daily filters")
-        return
-
-    preview = ", ".join([f"{c.symbol}({c.name})" for c in filtered[:10]])
-    notifier.send(f"daily_filter_pass={len(filtered)} symbols={preview}")
-
+    filtered: List[Candidate] = []
+    last_refresh: datetime | None = None
     positions: Dict[str, int] = {}
     for cycle in range(max(1, args.max_cycles)):
         now = datetime.now(KST)
-        if not in_korean_regular_session(now):
-            notifier.send("outside regular session -> stop")
-            break
+        if in_refresh_window(now, args.refresh_start_hhmm, args.refresh_end_hhmm):
+            need_refresh = last_refresh is None
+            if last_refresh is not None:
+                elapsed = (now - last_refresh).total_seconds() / 60.0
+                if elapsed >= max(1, int(args.refresh_interval_min)):
+                    need_refresh = True
+            if need_refresh:
+                universe = fetch_candidate_universe(
+                    base_url=args.base_url,
+                    token=token,
+                    app_key=args.app_key,
+                    app_secret=args.app_secret,
+                    max_universe=args.max_universe,
+                )
+                notifier.send(f"universe_candidates={len(universe)}")
+                filtered = minute_filter(
+                    base_url=args.base_url,
+                    token=token,
+                    app_key=args.app_key,
+                    app_secret=args.app_secret,
+                    universe=universe,
+                    ma_converge_pct=args.ma_converge_pct,
+                    ma60_no_break_days=args.ma60_no_break_days,
+                    ma20_support_days=args.ma20_support_days,
+                    bar_minutes=args.bar_minutes,
+                )
+                if not filtered:
+                    notifier.send("no symbol passed minute filters")
+                else:
+                    preview = ", ".join([f"{c.symbol}({c.name})" for c in filtered[:10]])
+                    notifier.send(f"minute_filter_pass={len(filtered)} symbols={preview}")
+                last_refresh = now
+
+        if not in_korean_regular_session(now) or not filtered:
+            if cycle + 1 < args.max_cycles:
+                time.sleep(max(1, int(args.scan_interval_sec)))
+            continue
         for c in filtered:
-            rows = fetch_minute_ohlcv(
+            raw_rows = fetch_minute_ohlcv(
                 base_url=args.base_url,
                 token=token,
                 app_key=args.app_key,
                 app_secret=args.app_secret,
                 symbol=c.symbol,
-                count_hint=180,
+                count_hint=raw_count_hint_for_resampled_bars(80, args.bar_minutes),
             )
+            rows = resample_bars(raw_rows, bar_minutes=args.bar_minutes)
             if len(rows) < 70:
                 continue
             close = rows[-1]["close"]

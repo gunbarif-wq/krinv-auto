@@ -18,7 +18,7 @@ This strategy file is isolated from existing `main.py` logic.
   - fluctuation rank
   - near-new-highlow rank
   - foreign/institution total
-- Daily filter:
+- Minute filter:
   - MA3/MA5/MA10 convergence
   - no MA60 break
   - MA20 support hold
