@@ -14,31 +14,47 @@ from sklearn.metrics import average_precision_score, precision_score, recall_sco
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 from build_ml_dataset import DEFAULT_MODEL_FEATURE_COLUMNS, build_rows, load_split as load_raw_split
+try:
+    from catboost import CatBoostClassifier
+except Exception:
+    CatBoostClassifier = None  # type: ignore[assignment]
 
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Train ML signal model and choose threshold on validation set")
-    p.add_argument("--dataset-dir", default="data/ml/225190")
+    p.add_argument("--dataset-dir", default="data/ml/225190_1y")
     p.add_argument("--raw-csv", default="", help="if set, build train/val/test from raw 1m csv directly")
     p.add_argument("--train-ratio", type=float, default=0.70)
     p.add_argument("--val-ratio", type=float, default=0.15)
     p.add_argument("--horizon-bars", type=int, default=30)
-    p.add_argument("--label-mode", default="fixed", choices=["fixed", "atr"])
+    p.add_argument("--label-mode", default="bearish2", choices=["fixed", "atr", "bearish2"])
     p.add_argument("--up-threshold", type=float, default=0.03)
     p.add_argument("--down-threshold", type=float, default=0.015)
     p.add_argument("--atr-up-mult", type=float, default=2.0)
     p.add_argument("--atr-down-mult", type=float, default=1.2)
     p.add_argument("--atr-floor-pct", type=float, default=0.003)
     p.add_argument("--symbol", default="225190")
-    p.add_argument("--model-kind", default="logistic", choices=["logistic", "gboost"])
+    p.add_argument("--model-kind", default="catboost", choices=["catboost", "logistic", "gboost"])
+    p.add_argument(
+        "--model-feature-set",
+        default="relprice",
+        choices=["all", "core3", "relprice", "smooth", "fast"],
+        help="feature subset used for training; 'relprice' is the default",
+    )
     p.add_argument("--logreg-c", type=float, default=10.0, help="inverse regularization strength for logistic")
+    p.add_argument(
+        "--positive-coef-only",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="for logistic, force all coefficients >= 0 by projection after fit",
+    )
     p.add_argument("--fee-roundtrip", type=float, default=0.004)
     p.add_argument("--min-trades", type=int, default=20)
     p.add_argument("--thr-start", type=float, default=0.50)
     p.add_argument("--thr-end", type=float, default=0.95)
     p.add_argument("--thr-step", type=float, default=0.01)
-    p.add_argument("--model-out", default="data/ml/225190/225190_model_up3_dn15.pkl")
-    p.add_argument("--report-out", default="data/ml/225190/225190_train_report_up3_dn15.json")
+    p.add_argument("--model-out", default="data/ml/225190_1y/225190_model_fast.pkl")
+    p.add_argument("--report-out", default="data/ml/225190_1y/225190_train_report_fast.json")
     return p.parse_args()
 
 
@@ -47,7 +63,7 @@ def infer_feature_columns(path: Path) -> List[str]:
         rdr = csv.DictReader(f)
         if rdr.fieldnames is None:
             raise RuntimeError(f"no header: {path}")
-        ignore = {"date", "label", "fwd_close_ret"}
+        ignore = {"date", "open", "label", "fwd_close_ret"}
         return [c for c in rdr.fieldnames if c not in ignore]
 
 
@@ -71,7 +87,7 @@ def load_split(path: Path, feature_columns: List[str]) -> Tuple[np.ndarray, np.n
 def feature_columns_from_rows(rows: List[Dict[str, str]]) -> List[str]:
     if not rows:
         raise RuntimeError("no rows for feature inference")
-    ignore = {"date", "label", "fwd_close_ret"}
+    ignore = {"date", "open", "label", "fwd_close_ret"}
     return [k for k in rows[0].keys() if k not in ignore]
 
 
@@ -96,6 +112,113 @@ def select_feature_columns(feature_columns: List[str]) -> List[str]:
     if len(selected) != len(DEFAULT_MODEL_FEATURE_COLUMNS):
         missing = [c for c in DEFAULT_MODEL_FEATURE_COLUMNS if c not in feature_columns]
         raise RuntimeError(f"missing default model features in dataset: {missing}")
+    return selected
+
+
+def choose_model_feature_columns(feature_columns: List[str], feature_set: str) -> List[str]:
+    absolute_price_like = {"close"}
+    if feature_set == "core3":
+        selected = [c for c in select_feature_columns(feature_columns) if c not in absolute_price_like]
+        if len(selected) != len(DEFAULT_MODEL_FEATURE_COLUMNS):
+            missing = [c for c in DEFAULT_MODEL_FEATURE_COLUMNS if c not in feature_columns or c in absolute_price_like]
+            raise RuntimeError(f"missing usable core features in dataset: {missing}")
+        return selected
+    if feature_set == "relprice":
+        selected_names = [
+            "ret_10",
+            "ret_20",
+            "ret_30",
+            "ret_60",
+            "hl_pct",
+            "candle_body_pct",
+            "upper_wick_pct",
+            "lower_wick_pct",
+            "gap_prev_close",
+            "high_prev_close",
+            "low_prev_close",
+            "volatility20",
+            "volatility60",
+            "ma_gap_5_20",
+            "ma_gap_10_20",
+            "ma_gap_20_60",
+            "macd_plus",
+            "slow_k14_3",
+            "momentum_20",
+            "rsi14",
+            "atr14_pct",
+            "boll_width20",
+            "vwap_gap_day",
+            "distance_to_vwap",
+        ]
+        selected = [c for c in selected_names if c in feature_columns]
+        missing = [c for c in selected_names if c not in feature_columns]
+        if missing:
+            raise RuntimeError(f"missing usable relprice features in dataset: {missing}")
+        return selected
+    if feature_set == "smooth":
+        selected_names = [
+            "ret_10",
+            "ret_20",
+            "ret_30",
+            "ret_60",
+            "hl_pct",
+            "candle_body_pct",
+            "upper_wick_pct",
+            "lower_wick_pct",
+            "gap_prev_close",
+            "high_prev_close",
+            "low_prev_close",
+            "volatility20",
+            "volatility60",
+            "ma_gap_10_20",
+            "ma_gap_20_60",
+            "macd_plus",
+            "slow_k14_3",
+            "momentum_20",
+            "rsi14",
+            "atr14_pct",
+            "boll_width20",
+            "vwap_gap_day",
+            "distance_to_vwap",
+        ]
+        selected = [c for c in selected_names if c in feature_columns]
+        missing = [c for c in selected_names if c not in feature_columns]
+        if missing:
+            raise RuntimeError(f"missing usable smooth features in dataset: {missing}")
+        return selected
+    if feature_set == "fast":
+        selected_names = [
+            "ret_1",
+            "ret_3",
+            "ret_5",
+            "ret_10",
+            "ret_20",
+            "hl_pct",
+            "candle_body_pct",
+            "upper_wick_pct",
+            "lower_wick_pct",
+            "gap_prev_close",
+            "high_prev_close",
+            "low_prev_close",
+            "volatility20",
+            "ma_gap_5_20",
+            "ma_gap_10_20",
+            "macd_plus",
+            "slow_k14_3",
+            "rsi14",
+            "atr14_pct",
+            "vwap_gap_day",
+            "distance_to_vwap",
+        ]
+        selected = [c for c in selected_names if c in feature_columns]
+        missing = [c for c in selected_names if c not in feature_columns]
+        if missing:
+            raise RuntimeError(f"missing usable fast features in dataset: {missing}")
+        return selected
+    ignore = {"date", "open", "label", "fwd_close_ret", *absolute_price_like}
+    selected = [c for c in feature_columns if c not in ignore]
+    if not selected:
+        raise RuntimeError("no usable features found in dataset")
     return selected
 
 
@@ -231,6 +354,13 @@ def print_model_weights(model: object, model_kind: str, feature_columns: List[st
         print("feature_importance:")
         for name, score in weights:
             print(f"{name}: {score:.10f}")
+        return
+    if model_kind == "catboost" and CatBoostClassifier is not None and isinstance(model, CatBoostClassifier):
+        imp = model.get_feature_importance()
+        weights = sorted(zip(feature_columns, imp.tolist()), key=lambda x: x[1], reverse=True)
+        print("feature_importance:")
+        for name, score in weights:
+            print(f"{name}: {float(score):.10f}")
 
 
 def main() -> None:
@@ -262,7 +392,7 @@ def main() -> None:
         val_rows = rows_all[cut1:cut2]
         test_rows = rows_all[cut2:]
         feature_columns = feature_columns_from_rows(rows_all)
-        feature_columns = select_feature_columns(feature_columns)
+        feature_columns = choose_model_feature_columns(feature_columns, args.model_feature_set)
         X_train, y_train, f_train = rows_to_arrays(train_rows, feature_columns)
         X_val, y_val, f_val = rows_to_arrays(val_rows, feature_columns)
         X_test, y_test, f_test = rows_to_arrays(test_rows, feature_columns)
@@ -273,7 +403,7 @@ def main() -> None:
         test_path = root / f"{args.symbol}_test_ml.csv"
 
         feature_columns = infer_feature_columns(train_path)
-        feature_columns = select_feature_columns(feature_columns)
+        feature_columns = choose_model_feature_columns(feature_columns, args.model_feature_set)
         if not feature_columns:
             raise RuntimeError(f"no feature columns inferred from {train_path}")
 
@@ -281,7 +411,21 @@ def main() -> None:
         X_val, y_val, f_val = load_split(val_path, feature_columns)
         X_test, y_test, f_test = load_split(test_path, feature_columns)
 
-    if args.model_kind == "logistic":
+    if args.model_kind == "catboost":
+        if CatBoostClassifier is None:
+            raise RuntimeError("catboost is not installed. Run: pip install catboost")
+        model = CatBoostClassifier(
+            loss_function="Logloss",
+            eval_metric="AUC",
+            depth=6,
+            learning_rate=0.03,
+            n_estimators=700,
+            l2_leaf_reg=5.0,
+            random_seed=42,
+            verbose=False,
+            allow_writing_files=False,
+        )
+    elif args.model_kind == "logistic":
         model: object = Pipeline(
             steps=[
                 ("scaler", StandardScaler()),
@@ -307,10 +451,14 @@ def main() -> None:
             random_state=42,
         )
     sw = class_weights(y_train)
-    if args.model_kind == "gboost":
+    if args.model_kind in {"gboost", "catboost"}:
         model.fit(X_train, y_train, sample_weight=sw)
     else:
         model.fit(X_train, y_train)
+        if args.model_kind == "logistic" and bool(args.positive_coef_only):
+            clf = model.named_steps.get("clf") if isinstance(model, Pipeline) else None
+            if isinstance(clf, LogisticRegression):
+                clf.coef_ = np.maximum(clf.coef_, 0.0)
 
     p_val = model.predict_proba(X_val)[:, 1]  # type: ignore[attr-defined]
     best_thr = select_threshold(
@@ -333,6 +481,8 @@ def main() -> None:
     report = {
         "symbol": args.symbol,
         "model_kind": args.model_kind,
+        "model_feature_set": args.model_feature_set,
+        "positive_coef_only": bool(args.positive_coef_only),
         "feature_columns": feature_columns,
         "threshold_selected_on_val": thr,
         "threshold_search_best": best_thr,
@@ -356,6 +506,8 @@ def main() -> None:
             {
                 "model": model,
                 "model_kind": args.model_kind,
+                "model_feature_set": args.model_feature_set,
+                "positive_coef_only": bool(args.positive_coef_only),
                 "feature_columns": feature_columns,
                 "threshold": thr,
                 "fee_roundtrip": args.fee_roundtrip,

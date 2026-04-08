@@ -13,20 +13,7 @@ from fetch_kis_daily import DEFAULT_BASE_URL, get_access_token
 from fetch_kis_minute import iter_business_days
 
 
-DEFAULT_SYMBOLS = [
-    # Defense (5)
-    "012450",  # Hanwha Aerospace
-    "079550",  # LIG Nex1
-    "047810",  # KAI
-    "272210",  # Hanwha Systems
-    "103140",  # Poongsan
-    # Space (5)
-    "099320",  # SATREC INITIATIVE
-    "211270",  # AP Satellite
-    "274090",  # Kenko Aerospace
-    "214270",  # Genohco
-    "271940",  # ILJIN Hysolus (aerospace supply-chain proxy)
-]
+DEFAULT_SYMBOLS = ["225190"]
 
 
 def load_dotenv(dotenv_path: str = ".env") -> None:
@@ -57,7 +44,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--include-today", action="store_true", default=True, help="include today's data")
     p.add_argument("--train-ratio", type=float, default=0.7, help="train split ratio by time")
     p.add_argument("--val-ratio", type=float, default=0.15, help="validation split ratio by time")
-    p.add_argument("--out-dir", default="data/backtest_sets", help="output root directory")
+    p.add_argument("--out-dir", default="data/backtest_sets_225190_1y", help="output root directory")
     p.add_argument("--max-bars-per-day", type=int, default=450)
     p.add_argument("--pause-ms", type=int, default=500)
     p.add_argument("--app-key", default=os.getenv("KIS_APP_KEY", ""))

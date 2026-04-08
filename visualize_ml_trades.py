@@ -3,24 +3,26 @@ from __future__ import annotations
 import argparse
 import csv
 import json
-import pickle
 from pathlib import Path
 from typing import Dict, List, Tuple
 from datetime import datetime, timedelta
 
 import numpy as np
 
-from backtest_ml_signal import PolicyConfig, run_policy
+from backtest_ml_signal import run_policy
 from build_ml_dataset import build_rows, load_split
+from ml_signal_common import PolicyConfig, ema_smooth, load_json, load_model_bundle, normalize_indicator
+from ml_trade_common import build_policy_config
 
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Visualize ML trades on price chart")
     p.add_argument("--raw-csv", default="data/backtest_sets_225190_1y/full_1m/225190_1m_full.csv")
-    p.add_argument("--feature-csv", default="", help="prebuilt ML feature csv (date,close,feature...,label,fwd_close_ret)")
+    p.add_argument("--feature-csv", default="data/ml/225190_1y/225190_test_ml.csv", help="prebuilt ML feature csv (date,close,feature...,label,fwd_close_ret)")
     p.add_argument("--price-csv", default="", help="OHLCV csv for candlestick (default: --raw-csv)")
-    p.add_argument("--model-path", default="data/ml/225190/225190_model_up3_dn15.pkl")
-    p.add_argument("--interactive-html", default="data/ml/225190/225190_trade_plot_up3_dn15.html")
+    p.add_argument("--model-path", default="data/ml/225190_1y/225190_model_fast.pkl")
+    p.add_argument("--policy-path", default="data/ml/225190_1y/225190_fast_policy.json")
+    p.add_argument("--interactive-html", default="data/ml/225190_1y/225190_trade_plot_fast.html")
     p.add_argument("--horizon-bars", type=int, default=30)
     p.add_argument("--label-mode", default="fixed", choices=["fixed", "atr"])
     p.add_argument("--up-threshold", type=float, default=0.03)
@@ -28,29 +30,27 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--atr-up-mult", type=float, default=2.0)
     p.add_argument("--atr-down-mult", type=float, default=1.2)
     p.add_argument("--atr-floor-pct", type=float, default=0.003)
-    p.add_argument("--threshold", type=float, default=0.80, help="entry threshold (default tuned policy: 0.80)")
-    p.add_argument("--fee-roundtrip", type=float, default=0.001, help="roundtrip fee (default tuned policy: 0.001)")
+    p.add_argument("--threshold", type=float, default=0.75, help="entry threshold (relprice default)")
+    p.add_argument("--fee-roundtrip", type=float, default=0.004, help="roundtrip fee (relprice default)")
     p.add_argument(
         "--indicator-cols",
-        default="ema_spread_3_8,rsi_5,distance_to_vwap",
+        default="price_z20,price_z60,atr14_pct,ma_gap_10_20,vwap_gap_day",
         help="comma separated feature columns to plot below price",
     )
-    p.add_argument("--indicator-mode", default="local_rank01", choices=["raw01", "local_rank01"])
+    p.add_argument("--indicator-mode", default="raw", choices=["raw"])
     p.add_argument("--indicator-window", type=int, default=120, help="window for local_rank01")
     p.add_argument("--score-threshold", type=float, default=None, help="0..1 threshold line (default: use strategy threshold)")
-    p.add_argument("--hold-bars", type=int, default=20)
-    p.add_argument("--take-profit-pct", type=float, default=0.0)
-    p.add_argument("--stop-loss-pct", type=float, default=0.0)
+    p.add_argument("--min-hold-bars", type=int, default=5)
     p.add_argument("--trailing-stop-pct", type=float, default=0.0)
     p.add_argument("--max-concurrent-positions", type=int, default=1)
     p.add_argument("--position-size-pct", type=float, default=1.0)
-    p.add_argument("--min-entry-gap-bars", type=int, default=1)
+    p.add_argument("--min-entry-gap-bars", type=int, default=0)
     p.add_argument("--entry-start-hhmm", type=int, default=900)
     p.add_argument("--entry-end-hhmm", type=int, default=1530)
-    p.add_argument("--skip-open-min", type=int, default=10)
+    p.add_argument("--skip-open-min", type=int, default=20)
     p.add_argument("--skip-close-min", type=int, default=10)
-    p.add_argument("--loss-streak-for-cooldown", type=int, default=1)
-    p.add_argument("--cooldown-bars", type=int, default=30)
+    p.add_argument("--loss-streak-for-cooldown", type=int, default=3)
+    p.add_argument("--cooldown-bars", type=int, default=60)
     p.add_argument("--initial-cash", type=float, default=10_000_000)
     p.add_argument("--start-datetime", default="", help="inclusive, e.g. 2026-03-01 or 2026-03-01 09:00:00")
     p.add_argument("--end-datetime", default="", help="inclusive, e.g. 2026-03-14 or 2026-03-14 15:30:00")
@@ -59,6 +59,7 @@ def parse_args() -> argparse.Namespace:
 
 def rows_to_arrays(rows: List[Dict[str, str]], feature_cols: List[str]) -> Tuple[np.ndarray, np.ndarray, List[str], Dict[str, np.ndarray]]:
     x: List[List[float]] = []
+    opens: List[float] = []
     close: List[float] = []
     dates: List[str] = []
     extra_cols: Dict[str, List[float]] = {c: [] for c in feature_cols}
@@ -66,6 +67,7 @@ def rows_to_arrays(rows: List[Dict[str, str]], feature_cols: List[str]) -> Tuple
         try:
             row_vals = [float(r[c]) for c in feature_cols]
             x.append(row_vals)
+            opens.append(float(r["open"]))
             close.append(float(r["close"]))
             dates.append(r["date"])
             for c, v in zip(feature_cols, row_vals):
@@ -75,7 +77,7 @@ def rows_to_arrays(rows: List[Dict[str, str]], feature_cols: List[str]) -> Tuple
     if not x:
         raise RuntimeError("empty rows after raw->feature build")
     extra_np = {k: np.asarray(v, dtype=float) for k, v in extra_cols.items()}
-    return np.asarray(x, dtype=float), np.asarray(close, dtype=float), dates, extra_np
+    return np.asarray(x, dtype=float), np.asarray(opens, dtype=float), np.asarray(close, dtype=float), dates, extra_np
 
 
 def load_feature_rows(path: Path) -> List[Dict[str, str]]:
@@ -102,40 +104,6 @@ def load_price_ohlc(path: Path) -> Dict[str, Tuple[float, float, float, float]]:
             except Exception:
                 continue
     return out
-
-
-def robust_minmax_01(arr: np.ndarray) -> np.ndarray:
-    x = np.asarray(arr, dtype=float).copy()
-    if x.size == 0:
-        return x
-    lo = float(np.nanpercentile(x, 1))
-    hi = float(np.nanpercentile(x, 99))
-    if not np.isfinite(lo) or not np.isfinite(hi) or hi - lo < 1e-12:
-        return np.full(x.shape[0], 0.5, dtype=float)
-    x = (x - lo) / (hi - lo)
-    return np.clip(x, 0.0, 1.0)
-
-
-def local_rank_01(arr: np.ndarray, window: int) -> np.ndarray:
-    x = np.asarray(arr, dtype=float)
-    n = x.shape[0]
-    w = max(10, int(window))
-    out = np.full(n, 0.5, dtype=float)
-    for i in range(n):
-        s = max(0, i - w + 1)
-        seg = x[s : i + 1]
-        if seg.size <= 1:
-            out[i] = 0.5
-            continue
-        v = x[i]
-        out[i] = float(np.sum(seg <= v)) / float(seg.size)
-    return np.clip(out, 0.0, 1.0)
-
-
-def normalize_indicator(arr: np.ndarray, mode: str, window: int) -> np.ndarray:
-    if mode == "local_rank01":
-        return local_rank_01(arr, window)
-    return robust_minmax_01(arr)
 
 
 def parse_dt_opt(s: str) -> datetime | None:
@@ -179,12 +147,13 @@ def filter_rows_by_range(
 
 def main() -> None:
     args = parse_args()
-    with Path(args.model_path).open("rb") as f:
-        bundle = pickle.load(f)
+    bundle = load_model_bundle(Path(args.model_path))
     model = bundle["model"]
     feature_cols: List[str] = bundle["feature_columns"]
-    threshold = float(args.threshold if args.threshold is not None else bundle.get("threshold", 0.8))
-    fee = float(args.fee_roundtrip if args.fee_roundtrip is not None else bundle.get("fee_roundtrip", 0.001))
+    policy_path = Path(args.policy_path)
+    policy: Dict[str, object] = load_json(policy_path)
+    threshold = float(policy.get("threshold", args.threshold if args.threshold is not None else bundle.get("threshold", 0.9)))
+    fee = float(policy.get("fee_roundtrip", args.fee_roundtrip if args.fee_roundtrip is not None else bundle.get("fee_roundtrip", 0.001)))
 
     if str(args.feature_csv).strip():
         rows = load_feature_rows(Path(args.feature_csv))
@@ -203,27 +172,39 @@ def main() -> None:
     if not rows:
         raise RuntimeError("no rows in feature dataset")
 
-    x, close, dates, feature_series = rows_to_arrays(rows, feature_cols)
+    x, open_, close, dates, feature_series = rows_to_arrays(rows, feature_cols)
+    vwap_gap_day = feature_series.get("vwap_gap_day", np.zeros_like(close))
     prob_raw = model.predict_proba(x)[:, 1]  # type: ignore[attr-defined]
-    prob_for_policy = normalize_indicator(prob_raw, args.indicator_mode, args.indicator_window)
-    cfg = PolicyConfig(
+    prob_for_policy = ema_smooth(prob_raw, 3)
+    cfg = build_policy_config(
+        policy,
         threshold=threshold,
         fee_roundtrip=fee,
-        hold_bars=max(1, int(args.hold_bars)),
-        entry_start_hhmm=int(args.entry_start_hhmm),
-        entry_end_hhmm=int(args.entry_end_hhmm),
-        skip_open_min=max(0, int(args.skip_open_min)),
-        skip_close_min=max(0, int(args.skip_close_min)),
-        loss_streak_for_cooldown=max(0, int(args.loss_streak_for_cooldown)),
-        cooldown_bars=max(0, int(args.cooldown_bars)),
-        take_profit_pct=max(0.0, float(args.take_profit_pct)),
-        stop_loss_pct=max(0.0, float(args.stop_loss_pct)),
-        trailing_stop_pct=max(0.0, float(args.trailing_stop_pct)),
-        max_concurrent_positions=max(1, int(args.max_concurrent_positions)),
-        position_size_pct=min(1.0, max(0.01, float(args.position_size_pct))),
-        min_entry_gap_bars=max(1, int(args.min_entry_gap_bars)),
+        min_hold_bars=args.min_hold_bars,
+        entry_start_hhmm=args.entry_start_hhmm,
+        entry_end_hhmm=args.entry_end_hhmm,
+        skip_open_min=args.skip_open_min,
+        skip_close_min=args.skip_close_min,
+        loss_streak_for_cooldown=args.loss_streak_for_cooldown,
+        cooldown_bars=args.cooldown_bars,
+        trailing_stop_pct=args.trailing_stop_pct,
+        trailing_activate_pct=0.0,
+        vwap_exit_min_hold_bars=0,
+        vwap_exit_max_profit_pct=0.0,
+        max_concurrent_positions=args.max_concurrent_positions,
+        position_size_pct=args.position_size_pct,
+        min_entry_gap_bars=args.min_entry_gap_bars,
     )
-    result = run_policy(prob=prob_for_policy, close=close, dates=dates, cfg=cfg, initial_cash=float(args.initial_cash), return_trades=True)
+    result = run_policy(
+        prob=prob_for_policy,
+        open_=open_,
+        close=close,
+        vwap_gap_day=vwap_gap_day,
+        dates=dates,
+        cfg=cfg,
+        initial_cash=float(args.initial_cash),
+        return_trades=True,
+    )
     trade_logs = json.loads(str(result.get("trade_logs", "[]")))
     score_threshold = float(args.score_threshold) if args.score_threshold is not None else threshold
     score_threshold = float(np.clip(score_threshold, 0.0, 1.0))
@@ -263,7 +244,7 @@ def main() -> None:
         raise RuntimeError(f"plotly import failed: {e}")
 
     ohlc_map: Dict[str, Tuple[float, float, float, float]] = {}
-    price_csv = str(args.price_csv).strip() or (str(args.raw_csv) if not str(args.feature_csv).strip() else "")
+    price_csv = str(args.price_csv).strip() or str(args.raw_csv).strip()
     if price_csv:
         ohlc_map = load_price_ohlc(Path(price_csv))
     x_all = [dates[i] for i in idx]
@@ -305,6 +286,10 @@ def main() -> None:
                 low=l_vals,
                 close=c_vals,
                 name="candles",
+                increasing_line_color="#d62728",
+                increasing_fillcolor="#d62728",
+                decreasing_line_color="#1f77b4",
+                decreasing_fillcolor="#1f77b4",
             ),
             row=1,
             col=1,

@@ -16,8 +16,14 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import average_precision_score, roc_auc_score
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
+try:
+    from catboost import CatBoostClassifier
+except Exception:
+    CatBoostClassifier = None  # type: ignore[assignment]
 
-from backtest_ml_signal import PolicyConfig, run_policy
+from ml_backtest_common import run_policy
+from ml_signal_common import PolicyConfig, load_json
+from ml_trade_common import build_policy_config
 from build_ml_dataset import build_rows, load_split
 from train_ml_signal import class_weights
 
@@ -26,7 +32,7 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Walk-forward ML training/validation/test with fixed policy parameters")
     p.add_argument("--data-root", default="data/backtest_sets_047810_5y")
     p.add_argument("--symbol", default="047810")
-    p.add_argument("--model-kind", default="logistic", choices=["logistic", "gboost", "hgb", "rf", "et", "auto"])
+    p.add_argument("--model-kind", default="catboost", choices=["catboost", "logistic", "gboost", "hgb", "rf", "et", "auto"])
     p.add_argument("--model-top-k", type=int, default=2, help="use top-K quick-scored models for policy search")
     p.add_argument("--max-model-candidates", type=int, default=12, help="applies when model-kind=auto")
     p.add_argument("--horizon-bars", type=int, default=30)
@@ -39,7 +45,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--atr-up-mult", type=float, default=2.0)
     p.add_argument("--atr-down-mult", type=float, default=1.2)
     p.add_argument("--atr-floor-pct", type=float, default=0.003)
+    p.add_argument("--min-history-bars", type=int, default=30, help="minimum same-day history bars required before emitting a row")
     p.add_argument("--fee-roundtrip", type=float, default=0.001)
+    p.add_argument("--policy-path", default="data/ml/225190_1y/225190_fast_policy.json")
     p.add_argument("--wf-train-days", type=int, default=60)
     p.add_argument("--wf-val-days", type=int, default=15)
     p.add_argument("--wf-test-days", type=int, default=10)
@@ -57,17 +65,20 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--max-trades", type=int, default=400)
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--threshold", type=float, default=0.80)
-    p.add_argument("--hold-bars", type=int, default=20)
+    p.add_argument("--min-score-delta", type=float, default=0.0, help="entry requires score_t - score_t-1 >= this value")
+    p.add_argument("--hold-bars", type=int, default=10)
+    p.add_argument("--min-hold-bars", type=int, default=2)
+    p.add_argument("--exit-threshold", type=float, default=0.62, help="score-drop exit threshold (<=0 disables)")
     p.add_argument("--skip-open-min", type=int, default=10)
     p.add_argument("--skip-close-min", type=int, default=10)
-    p.add_argument("--loss-streak-for-cooldown", type=int, default=1)
-    p.add_argument("--cooldown-bars", type=int, default=30)
+    p.add_argument("--loss-streak-for-cooldown", type=int, default=0)
+    p.add_argument("--cooldown-bars", type=int, default=0)
     p.add_argument("--take-profit-pct", type=float, default=0.0)
     p.add_argument("--stop-loss-pct", type=float, default=0.0)
     p.add_argument("--trailing-stop-pct", type=float, default=0.0)
-    p.add_argument("--max-concurrent-positions", type=int, default=1)
+    p.add_argument("--max-concurrent-positions", type=int, default=3)
     p.add_argument("--position-size-pct", type=float, default=1.0)
-    p.add_argument("--min-entry-gap-bars", type=int, default=1)
+    p.add_argument("--min-entry-gap-bars", type=int, default=0)
     p.add_argument("--entry-start-hhmm", type=int, default=900)
     p.add_argument("--entry-end-hhmm", type=int, default=1530)
     p.add_argument("--initial-cash", type=float, default=10_000_000)
@@ -84,28 +95,41 @@ def feature_columns_from_rows(rows: List[Dict[str, str]]) -> List[str]:
 
 def rows_to_arrays(
     rows: List[Dict[str, str]], feature_cols: List[str]
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, List[str]]:
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, List[str]]:
     X: List[List[float]] = []
     y: List[int] = []
+    open_: List[float] = []
     close: List[float] = []
     fwd: List[float] = []
+    vwap_gap_day: List[float] = []
     dates: List[str] = []
     for r in rows:
         try:
             X.append([float(r[c]) for c in feature_cols])
             y.append(int(r["label"]))
+            open_.append(float(r["open"]))
             close.append(float(r["close"]))
             fwd.append(float(r["fwd_close_ret"]))
+            vwap_gap_day.append(float(r.get("vwap_gap_day", 0.0)))
             dates.append(r["date"])
         except Exception:
             continue
     if not X:
-        return np.empty((0, len(feature_cols))), np.empty((0,), dtype=int), np.empty((0,)), np.empty((0,)), []
+        return (
+            np.empty((0, len(feature_cols))),
+            np.empty((0,), dtype=int),
+            np.empty((0,)),
+            np.empty((0,)),
+            np.empty((0,)),
+            [],
+        )
     return (
         np.asarray(X, dtype=float),
         np.asarray(y, dtype=int),
+        np.asarray(open_, dtype=float),
         np.asarray(close, dtype=float),
         np.asarray(fwd, dtype=float),
+        np.asarray(vwap_gap_day, dtype=float),
         dates,
     )
 
@@ -115,6 +139,20 @@ def unique_days(rows: List[Dict[str, str]]) -> List[str]:
 
 
 def build_model(kind: str, y_train: np.ndarray) -> object:
+    if kind == "catboost":
+        if CatBoostClassifier is None:
+            raise RuntimeError("catboost is not installed. Run: pip install catboost")
+        return CatBoostClassifier(
+            loss_function="Logloss",
+            eval_metric="AUC",
+            depth=6,
+            learning_rate=0.03,
+            n_estimators=700,
+            l2_leaf_reg=5.0,
+            random_seed=42,
+            verbose=False,
+            allow_writing_files=False,
+        )
     if kind == "logistic":
         return Pipeline(
             steps=[
@@ -227,7 +265,7 @@ def predict_prob(model: object, x: np.ndarray) -> np.ndarray:
 def list_model_kinds(args: argparse.Namespace) -> List[str]:
     if args.model_kind != "auto":
         return [args.model_kind]
-    kinds = ["logistic", "gboost", "hgb", "rf", "et"]
+    kinds = ["catboost", "logistic", "gboost", "hgb", "rf", "et"]
     rng = random.Random(args.seed)
     if args.max_model_candidates > 0 and len(kinds) > args.max_model_candidates:
         kinds = rng.sample(kinds, k=args.max_model_candidates)
@@ -247,7 +285,7 @@ def evaluate_models(
     for kind in list_model_kinds(args):
         try:
             model = build_model(kind, y_train)
-            if kind in {"gboost", "hgb", "rf", "et"}:
+            if kind in {"catboost", "gboost", "hgb", "rf", "et"}:
                 model.fit(x_train, y_train, sample_weight=class_weights(y_train))
             else:
                 model.fit(x_train, y_train)
@@ -348,6 +386,7 @@ def main() -> None:
     rows_all = build_rows(
         data=raw,
         horizon=args.horizon_bars,
+        min_history_bars=args.min_history_bars,
         label_mode=args.label_mode,
         up_threshold=args.up_threshold,
         down_threshold=args.down_threshold,
@@ -364,22 +403,25 @@ def main() -> None:
     if len(all_days) < need:
         raise RuntimeError(f"not enough days for walk-forward: have={len(all_days)} need={need}")
 
-    cfg_fixed = PolicyConfig(
-        threshold=float(args.threshold),
-        fee_roundtrip=float(args.fee_roundtrip),
-        hold_bars=max(1, int(args.hold_bars)),
-        entry_start_hhmm=int(args.entry_start_hhmm),
-        entry_end_hhmm=int(args.entry_end_hhmm),
-        skip_open_min=max(0, int(args.skip_open_min)),
-        skip_close_min=max(0, int(args.skip_close_min)),
-        loss_streak_for_cooldown=max(0, int(args.loss_streak_for_cooldown)),
-        cooldown_bars=max(0, int(args.cooldown_bars)),
-        take_profit_pct=max(0.0, float(args.take_profit_pct)),
-        stop_loss_pct=max(0.0, float(args.stop_loss_pct)),
-        trailing_stop_pct=max(0.0, float(args.trailing_stop_pct)),
-        max_concurrent_positions=max(1, int(args.max_concurrent_positions)),
-        position_size_pct=min(1.0, max(0.01, float(args.position_size_pct))),
-        min_entry_gap_bars=max(1, int(args.min_entry_gap_bars)),
+    policy = load_json(Path(args.policy_path))
+    cfg_fixed = build_policy_config(
+        policy,
+        threshold=float(policy.get("threshold", args.threshold)),
+        fee_roundtrip=float(policy.get("fee_roundtrip", args.fee_roundtrip)),
+        min_hold_bars=max(1, int(policy.get("min_hold_bars", args.min_hold_bars))),
+        entry_start_hhmm=int(policy.get("entry_start_hhmm", args.entry_start_hhmm)),
+        entry_end_hhmm=int(policy.get("entry_end_hhmm", args.entry_end_hhmm)),
+        skip_open_min=max(0, int(policy.get("skip_open_min", args.skip_open_min))),
+        skip_close_min=max(0, int(policy.get("skip_close_min", args.skip_close_min))),
+        loss_streak_for_cooldown=max(0, int(policy.get("loss_streak_for_cooldown", args.loss_streak_for_cooldown))),
+        cooldown_bars=max(0, int(policy.get("cooldown_bars", args.cooldown_bars))),
+        trailing_stop_pct=max(0.0, float(policy.get("trailing_stop_pct", args.trailing_stop_pct))),
+        trailing_activate_pct=max(0.0, float(policy.get("trailing_activate_pct", 0.0))),
+        vwap_exit_min_hold_bars=max(0, int(policy.get("vwap_exit_min_hold_bars", 0))),
+        vwap_exit_max_profit_pct=float(policy.get("vwap_exit_max_profit_pct", 0.0)),
+        max_concurrent_positions=max(1, int(policy.get("max_concurrent_positions", args.max_concurrent_positions))),
+        position_size_pct=min(1.0, max(0.01, float(policy.get("position_size_pct", args.position_size_pct)))),
+        min_entry_gap_bars=max(0, int(policy.get("min_entry_gap_bars", args.min_entry_gap_bars))),
     )
 
     out_dir = Path(args.out_dir) / args.symbol
@@ -402,7 +444,10 @@ def main() -> None:
         "model_ap",
         "model_prec_min_trades",
         "thr_selected",
+        "min_score_delta",
         "hold_bars",
+        "min_hold_bars",
+        "exit_threshold",
         "skip_open_min",
         "skip_close_min",
         "loss_streak",
@@ -443,9 +488,9 @@ def main() -> None:
             val_rows = [r for r in rows_all if r["date"][:10] in val_set]
             test_rows = [r for r in rows_all if r["date"][:10] in test_set]
 
-            X_train, y_train, _close_train, fwd_train, _dates_train = rows_to_arrays(train_rows, feature_cols)
-            X_val, y_val, close_val, _fwd_val, dates_val = rows_to_arrays(val_rows, feature_cols)
-            X_test, y_test, close_test, _fwd_test, dates_test = rows_to_arrays(test_rows, feature_cols)
+            X_train, y_train, _open_train, _close_train, fwd_train, _vwap_train, _dates_train = rows_to_arrays(train_rows, feature_cols)
+            X_val, y_val, open_val, close_val, _fwd_val, vwap_val, dates_val = rows_to_arrays(val_rows, feature_cols)
+            X_test, y_test, open_test, close_test, _fwd_test, vwap_test, dates_test = rows_to_arrays(test_rows, feature_cols)
 
             if min(X_train.shape[0], X_val.shape[0], X_test.shape[0]) < 100:
                 start += args.wf_step_days
@@ -477,7 +522,9 @@ def main() -> None:
             for m in model_evals:
                 val_res = run_policy(
                     prob=m.signal_val,
+                    open_=open_val,
                     close=close_val,
+                    vwap_gap_day=vwap_val,
                     dates=dates_val,
                     cfg=cfg_fixed,
                     initial_cash=float(args.initial_cash),
@@ -498,7 +545,9 @@ def main() -> None:
                     best_model = m
                     best_test = run_policy(
                         prob=m.signal_test,
+                        open_=open_test,
                         close=close_test,
+                        vwap_gap_day=vwap_test,
                         dates=dates_test,
                         cfg=cfg_fixed,
                         initial_cash=float(args.initial_cash),
@@ -522,7 +571,10 @@ def main() -> None:
                 "model_ap": best_model.ap,
                 "model_prec_min_trades": best_model.precision_min_trades,
                 "thr_selected": best_policy.threshold,
+                "min_score_delta": best_policy.min_score_delta,
                 "hold_bars": best_policy.hold_bars,
+                "min_hold_bars": best_policy.min_hold_bars,
+                "exit_threshold": best_policy.exit_threshold,
                 "skip_open_min": best_policy.skip_open_min,
                 "skip_close_min": best_policy.skip_close_min,
                 "loss_streak": best_policy.loss_streak_for_cooldown,
@@ -554,18 +606,24 @@ def main() -> None:
                     **row,
                     "policy": {
                         "threshold": best_policy.threshold,
+                        "min_score_delta": best_policy.min_score_delta,
                         "hold_bars": best_policy.hold_bars,
+                        "min_hold_bars": best_policy.min_hold_bars,
+                        "exit_threshold": best_policy.exit_threshold,
                         "entry_start_hhmm": best_policy.entry_start_hhmm,
                         "entry_end_hhmm": best_policy.entry_end_hhmm,
                         "skip_open_min": best_policy.skip_open_min,
                         "skip_close_min": best_policy.skip_close_min,
-                        "loss_streak_for_cooldown": best_policy.loss_streak_for_cooldown,
-                        "cooldown_bars": best_policy.cooldown_bars,
-                        "take_profit_pct": best_policy.take_profit_pct,
-                        "stop_loss_pct": best_policy.stop_loss_pct,
-                        "trailing_stop_pct": best_policy.trailing_stop_pct,
-                        "max_concurrent_positions": best_policy.max_concurrent_positions,
-                        "position_size_pct": best_policy.position_size_pct,
+        "loss_streak_for_cooldown": best_policy.loss_streak_for_cooldown,
+        "cooldown_bars": best_policy.cooldown_bars,
+        "take_profit_pct": best_policy.take_profit_pct,
+        "stop_loss_pct": best_policy.stop_loss_pct,
+        "trailing_stop_pct": best_policy.trailing_stop_pct,
+        "trailing_activate_pct": best_policy.trailing_activate_pct,
+        "vwap_exit_min_hold_bars": best_policy.vwap_exit_min_hold_bars,
+        "vwap_exit_max_profit_pct": best_policy.vwap_exit_max_profit_pct,
+        "max_concurrent_positions": best_policy.max_concurrent_positions,
+        "position_size_pct": best_policy.position_size_pct,
                         "min_entry_gap_bars": best_policy.min_entry_gap_bars,
                         "fee_roundtrip": best_policy.fee_roundtrip,
                     },

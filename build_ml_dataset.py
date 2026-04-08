@@ -25,13 +25,6 @@ FEATURE_COLUMNS = [
     "gap_prev_close",
     "high_prev_close",
     "low_prev_close",
-    "vol_ratio20",
-    "vol_ratio60",
-    "vol_z20",
-    "vol_z60",
-    "vol_ret_1",
-    "vol_ret_5",
-    "turnover_z20",
     "volatility20",
     "volatility60",
     "ma_gap_5_20",
@@ -45,13 +38,10 @@ FEATURE_COLUMNS = [
     "rsi14",
     "atr14_pct",
     "boll_width20",
-    "day_ret_open",
-    "day_range_pos",
     "vwap_gap_day",
     "ema_spread_3_8",
     "rsi_5",
     "distance_to_vwap",
-    "minute_norm",
 ]
 
 DEFAULT_MODEL_FEATURE_COLUMNS = [
@@ -66,13 +56,14 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--data-root", default="data/backtest_sets_225190_1y")
     p.add_argument("--symbol", default="225190")
     p.add_argument("--horizon-bars", type=int, default=30)
-    p.add_argument("--label-mode", default="fixed", choices=["fixed", "atr"])
+    p.add_argument("--label-mode", default="bearish2", choices=["fixed", "atr", "bearish2"])
     p.add_argument("--up-threshold", type=float, default=0.03)
     p.add_argument("--down-threshold", type=float, default=0.015)
     p.add_argument("--atr-up-mult", type=float, default=2.0)
     p.add_argument("--atr-down-mult", type=float, default=1.2)
     p.add_argument("--atr-floor-pct", type=float, default=0.003)
-    p.add_argument("--out-dir", default="data/ml")
+    p.add_argument("--min-history-bars", type=int, default=30, help="minimum same-day history bars required before emitting a row")
+    p.add_argument("--out-dir", default="data/ml/225190_1y")
     return p.parse_args()
 
 
@@ -250,9 +241,33 @@ def minute_norm_vec(dates: List[str]) -> np.ndarray:
     return out
 
 
+def day_boundaries(dates: List[str]) -> List[tuple[int, int]]:
+    if not dates:
+        return []
+    bounds: List[tuple[int, int]] = []
+    start = 0
+    cur_day = dates[0][:10] if len(dates[0]) >= 10 else ""
+    for i, dt in enumerate(dates):
+        day = dt[:10] if len(dt) >= 10 else ""
+        if day != cur_day:
+            bounds.append((start, i))
+            start = i
+            cur_day = day
+    bounds.append((start, len(dates)))
+    return bounds
+
+
+def apply_by_day(dates: List[str], fn):
+    out = []
+    for s, e in day_boundaries(dates):
+        out.append(fn(s, e))
+    return np.concatenate(out, axis=0) if out else np.array([], dtype=float)
+
+
 def build_rows(
     data: Dict[str, np.ndarray | List[str]],
     horizon: int,
+    min_history_bars: int,
     label_mode: str,
     up_threshold: float,
     down_threshold: float,
@@ -271,72 +286,112 @@ def build_rows(
     if n <= horizon + 30:
         return []
 
-    ret_1 = safe_div(c - np.roll(c, 1), np.roll(c, 1))
-    ret_3 = safe_div(c - np.roll(c, 3), np.roll(c, 3))
-    ret_5 = safe_div(c - np.roll(c, 5), np.roll(c, 5))
-    ret_10 = safe_div(c - np.roll(c, 10), np.roll(c, 10))
-    ret_20 = safe_div(c - np.roll(c, 20), np.roll(c, 20))
-    ret_30 = safe_div(c - np.roll(c, 30), np.roll(c, 30))
-    ret_60 = safe_div(c - np.roll(c, 60), np.roll(c, 60))
+    def daywise(arr_fn):
+        parts: List[np.ndarray] = []
+        for s, e in day_boundaries(dates):  # type: ignore[arg-type]
+            parts.append(arr_fn(s, e))
+        return np.concatenate(parts, axis=0) if parts else np.array([], dtype=float)
+
+    def ret_window(window: int) -> np.ndarray:
+        out = np.full(n, np.nan, dtype=float)
+        for s, e in day_boundaries(dates):  # type: ignore[arg-type]
+            seg = c[s:e]
+            if seg.shape[0] <= window:
+                continue
+            prev = np.roll(seg, window)
+            out[s:e] = safe_div(seg - prev, prev)
+        return out
+
+    ret_1 = ret_window(1)
+    ret_3 = ret_window(3)
+    ret_5 = ret_window(5)
+    ret_10 = ret_window(10)
+    ret_20 = ret_window(20)
+    ret_30 = ret_window(30)
+    ret_60 = ret_window(60)
     hl_pct = safe_div(h - l, c)
     oc_pct = safe_div(c - o, o)
     candle_body_pct = safe_div(np.abs(c - o), o)
     upper_wick_pct = safe_div(h - np.maximum(o, c), c)
     lower_wick_pct = safe_div(np.minimum(o, c) - l, c)
-    gap_prev_close = safe_div(o - np.roll(c, 1), np.roll(c, 1))
-    high_prev_close = safe_div(h - np.roll(c, 1), np.roll(c, 1))
-    low_prev_close = safe_div(l - np.roll(c, 1), np.roll(c, 1))
+    gap_prev_close = np.full(n, np.nan, dtype=float)
+    high_prev_close = np.full(n, np.nan, dtype=float)
+    low_prev_close = np.full(n, np.nan, dtype=float)
+    for s, e in day_boundaries(dates):  # type: ignore[arg-type]
+        if e - s <= 1:
+            continue
+        prev_close_day = np.roll(c[s:e], 1)
+        gap_prev_close[s:e] = safe_div(o[s:e] - prev_close_day, prev_close_day)
+        high_prev_close[s:e] = safe_div(h[s:e] - prev_close_day, prev_close_day)
+        low_prev_close[s:e] = safe_div(l[s:e] - prev_close_day, prev_close_day)
 
-    vol_mean20 = rolling_mean(v, 20)
-    vol_mean60 = rolling_mean(v, 60)
-    vol_std20 = rolling_std(v, 20)
-    vol_std60 = rolling_std(v, 60)
+    vol_mean20 = daywise(lambda s, e: rolling_mean(v[s:e], 20))
+    vol_mean60 = daywise(lambda s, e: rolling_mean(v[s:e], 60))
+    vol_std20 = daywise(lambda s, e: rolling_std(v[s:e], 20))
+    vol_std60 = daywise(lambda s, e: rolling_std(v[s:e], 60))
     vol_ratio20 = safe_div(v, vol_mean20)
     vol_ratio60 = safe_div(v, vol_mean60)
     vol_z20 = safe_div(v - vol_mean20, vol_std20)
     vol_z60 = safe_div(v - vol_mean60, vol_std60)
-    vol_ret_1 = safe_div(v - np.roll(v, 1), np.roll(v, 1))
-    vol_ret_5 = safe_div(v - np.roll(v, 5), np.roll(v, 5))
-    turnover = c * v
-    turnover_mean20 = rolling_mean(turnover, 20)
-    turnover_std20 = rolling_std(turnover, 20)
-    turnover_z20 = safe_div(turnover - turnover_mean20, turnover_std20)
-    volatility20 = rolling_std(ret_1, 20)
-    volatility60 = rolling_std(ret_1, 60)
+    def volume_ret(window: int) -> np.ndarray:
+        out = np.full(n, np.nan, dtype=float)
+        for s, e in day_boundaries(dates):  # type: ignore[arg-type]
+            seg = v[s:e]
+            if seg.shape[0] <= window:
+                continue
+            prev = np.roll(seg, window)
+            out[s:e] = safe_div(seg - prev, prev)
+        return out
 
-    ma5 = rolling_mean(c, 5)
-    ma10 = rolling_mean(c, 10)
-    ma20 = rolling_mean(c, 20)
-    ma60 = rolling_mean(c, 60)
+    vol_ret_1 = volume_ret(1)
+    vol_ret_5 = volume_ret(5)
+    turnover = c * v
+    turnover_mean20 = daywise(lambda s, e: rolling_mean(turnover[s:e], 20))
+    turnover_std20 = daywise(lambda s, e: rolling_std(turnover[s:e], 20))
+    turnover_z20 = safe_div(turnover - turnover_mean20, turnover_std20)
+    volatility20 = daywise(lambda s, e: rolling_std(ret_1[s:e], 20))
+    volatility60 = daywise(lambda s, e: rolling_std(ret_1[s:e], 60))
+
+    ma5 = daywise(lambda s, e: rolling_mean(c[s:e], 5))
+    ma10 = daywise(lambda s, e: rolling_mean(c[s:e], 10))
+    ma20 = daywise(lambda s, e: rolling_mean(c[s:e], 20))
+    ma60 = daywise(lambda s, e: rolling_mean(c[s:e], 60))
     ma_gap_5_20 = safe_div(ma5 - ma20, ma20)
     ma_gap_10_20 = safe_div(ma10 - ma20, ma20)
     ma_gap_20_60 = safe_div(ma20 - ma60, ma60)
-    ema12 = ema_vec(c, 12)
-    ema26 = ema_vec(c, 26)
+    ema12 = daywise(lambda s, e: ema_vec(c[s:e], 12))
+    ema26 = daywise(lambda s, e: ema_vec(c[s:e], 26))
     macd_line = ema12 - ema26
-    macd_signal = ema_vec(macd_line, 9)
+    macd_signal = daywise(lambda s, e: ema_vec(macd_line[s:e], 9))
     macd_hist = macd_line - macd_signal
-    macd_plus = rolling_minmax01(macd_hist, 120)
-    ll14 = rolling_min(l, 14)
-    hh14 = rolling_max(h, 14)
+    macd_plus = daywise(lambda s, e: rolling_minmax01(macd_hist[s:e], 120))
+    ll14 = daywise(lambda s, e: rolling_min(l[s:e], 14))
+    hh14 = daywise(lambda s, e: rolling_max(h[s:e], 14))
     fast_k14 = np.full(n, 0.5, dtype=float)
     den_k14 = hh14 - ll14
     ok_k14 = np.isfinite(c) & np.isfinite(ll14) & np.isfinite(hh14) & (den_k14 > 1e-12)
     fast_k14[ok_k14] = (c[ok_k14] - ll14[ok_k14]) / den_k14[ok_k14]
-    slow_k14_3 = rolling_mean(fast_k14, 3)
-    close_std20 = rolling_std(c, 20)
-    close_std60 = rolling_std(c, 60)
+    slow_k14_3 = daywise(lambda s, e: rolling_mean(fast_k14[s:e], 3))
+    close_std20 = daywise(lambda s, e: rolling_std(c[s:e], 20))
+    close_std60 = daywise(lambda s, e: rolling_std(c[s:e], 60))
     price_z20 = safe_div(c - ma20, close_std20)
     price_z60 = safe_div(c - ma60, close_std60)
     momentum_20 = ret_20.copy()
-    rsi14 = safe_div(rsi_vec(c, 14), np.full(n, 100.0))  # normalize to 0..1
-    ema3 = ema_vec(c, 3)
-    ema8 = ema_vec(c, 8)
+    rsi14 = daywise(lambda s, e: safe_div(rsi_vec(c[s:e], 14), np.full(e - s, 100.0)))  # normalize to 0..1
+    ema3 = daywise(lambda s, e: ema_vec(c[s:e], 3))
+    ema8 = daywise(lambda s, e: ema_vec(c[s:e], 8))
     ema_spread_3_8 = ema3 - ema8
-    rsi_5 = safe_div(rsi_vec(c, 5), np.full(n, 100.0))
-    prev_close = np.roll(c, 1)
-    tr = np.maximum.reduce([h - l, np.abs(h - prev_close), np.abs(l - prev_close)])
-    atr14 = rolling_mean(tr, 14)
+    rsi_5 = daywise(lambda s, e: safe_div(rsi_vec(c[s:e], 5), np.full(e - s, 100.0)))
+    tr = np.full(n, np.nan, dtype=float)
+    for s, e in day_boundaries(dates):  # type: ignore[arg-type]
+        seg_h = h[s:e]
+        seg_l = l[s:e]
+        seg_c = c[s:e]
+        if seg_c.size == 0:
+            continue
+        prev_close = np.roll(seg_c, 1)
+        tr[s:e] = np.maximum.reduce([seg_h - seg_l, np.abs(seg_h - prev_close), np.abs(seg_l - prev_close)])
+    atr14 = daywise(lambda s, e: rolling_mean(tr[s:e], 14))
     atr14_pct = safe_div(atr14, c)
     boll_width20 = safe_div(4.0 * close_std20, ma20)
     intra = intraday_vectors(dates, o, h, l, c, v)  # type: ignore[arg-type]
@@ -347,7 +402,7 @@ def build_rows(
     distance_to_vwap = vwap_gap_day.copy()
     minute_norm = minute_norm_vec(dates)  # type: ignore[arg-type]
 
-    start = 60
+    start = max(1, int(min_history_bars))
     end = n - horizon
     out: List[Dict[str, str]] = []
     for i in range(start, end):
@@ -398,11 +453,36 @@ def build_rows(
             ],
             dtype=float,
         )
-        if not np.isfinite(feats).all():
-            continue
+        # Early-session rows can legitimately have limited history for longer lookbacks.
+        # Fill missing values with neutral zeros so the dataset can start near 09:30.
+        feats = np.nan_to_num(feats, nan=0.0, posinf=0.0, neginf=0.0)
 
         entry = c[i]
-        if label_mode == "atr":
+        if label_mode == "bearish2":
+            bearish_count = 0
+            exit_i = None
+            for j in range(i + 1, n):
+                if c[j] < o[j]:
+                    bearish_count += 1
+                if bearish_count >= 2:
+                    exit_i = j
+                    break
+            if exit_i is None:
+                exit_i = n - 1
+            label = 1 if (c[exit_i] / entry - 1.0) > 0 else 0
+            fwd_close_ret = c[exit_i] / entry - 1.0
+            row = {
+                "date": str(dates[i]),
+                "open": f"{o[i]:.6f}",
+                "close": f"{entry:.6f}",
+                "label": str(label),
+                "fwd_close_ret": f"{fwd_close_ret:.8f}",
+            }
+            for col, val in zip(FEATURE_COLUMNS, feats):
+                row[col] = f"{val:.8f}"
+            out.append(row)
+            continue
+        elif label_mode == "atr":
             atr_here = float(atr14[i]) if np.isfinite(atr14[i]) and atr14[i] > 0 else 0.0
             atr_floor = entry * max(0.0, float(atr_floor_pct))
             atr_used = max(atr_here, atr_floor)
@@ -423,6 +503,7 @@ def build_rows(
 
         row = {
             "date": str(dates[i]),
+            "open": f"{o[i]:.6f}",
             "close": f"{entry:.6f}",
             "label": str(label),
             "fwd_close_ret": f"{fwd_close_ret:.8f}",
@@ -436,7 +517,7 @@ def build_rows(
 def save_rows(path: Path, rows: List[Dict[str, str]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", newline="", encoding="utf-8") as f:
-        fieldnames = ["date", "close", *FEATURE_COLUMNS, "label", "fwd_close_ret"]
+        fieldnames = ["date", "open", "close", *FEATURE_COLUMNS, "label", "fwd_close_ret"]
         w = csv.DictWriter(f, fieldnames=fieldnames)
         w.writeheader()
         w.writerows(rows)
@@ -462,6 +543,7 @@ def main() -> None:
         rows = build_rows(
             data=data,
             horizon=args.horizon_bars,
+            min_history_bars=args.min_history_bars,
             label_mode=args.label_mode,
             up_threshold=args.up_threshold,
             down_threshold=args.down_threshold,
@@ -476,6 +558,7 @@ def main() -> None:
     meta = {
         "symbol": args.symbol,
         "horizon_bars": args.horizon_bars,
+        "min_history_bars": args.min_history_bars,
         "label_mode": args.label_mode,
         "up_threshold": args.up_threshold,
         "down_threshold": args.down_threshold,

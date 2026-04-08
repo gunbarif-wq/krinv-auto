@@ -31,6 +31,7 @@ def main() -> None:
     rows = build_rows(
         data=data,
         horizon=args.horizon_bars,
+        min_history_bars=args.horizon_bars,
         label_mode=args.label_mode,
         up_threshold=args.up_threshold,
         down_threshold=args.down_threshold,
