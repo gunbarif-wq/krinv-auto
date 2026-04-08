@@ -70,7 +70,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--startup-lookback-minutes", type=int, default=25, help="extra warmup minutes for startup/immediate trading")
     p.add_argument("--startup-history-bars", type=int, default=120, help="max number of historical 1m bars to prefill at startup")
     p.add_argument("--live-dashboard-html", default="data/ml/225190_1y/225190_live_dashboard.html", help="realtime html dashboard path")
-    p.add_argument("--live-dashboard-refresh-sec", type=int, default=5, help="browser refresh interval for the live dashboard")
+    p.add_argument("--live-dashboard-refresh-sec", type=int, default=30, help="browser refresh interval for the live dashboard")
     p.add_argument("--live-dashboard-history-bars", type=int, default=300, help="max bars shown in the live dashboard")
     p.add_argument(
         "--live-dashboard-indicator-cols",
@@ -416,6 +416,7 @@ def write_live_dashboard_html(
     score_threshold: float,
     indicator_cols: List[str],
     refresh_sec: int,
+    max_points: int,
 ) -> None:
     try:
         import plotly.graph_objects as go
@@ -435,6 +436,22 @@ def write_live_dashboard_html(
     indicators: Dict[str, List[float]] = state["indicators"]  # type: ignore[assignment]
     events: List[Dict[str, object]] = state["events"]  # type: ignore[assignment]
     summary: Dict[str, object] = state.get("summary", {})  # type: ignore[assignment]
+
+    if max_points > 0 and len(dates) > max_points:
+        dates = dates[-max_points:]
+        opens = opens[-max_points:]
+        highs = highs[-max_points:]
+        lows = lows[-max_points:]
+        closes = closes[-max_points:]
+        scores = scores[-max_points:]
+        probs = probs[-max_points:]
+        alpha_raws = alpha_raws[-max_points:]
+        ret_preds = ret_preds[-max_points:]
+        for c in list(indicators.keys()):
+            vals = indicators.get(c, [])
+            if isinstance(vals, list) and len(vals) > max_points:
+                indicators[c] = vals[-max_points:]
+    events = events[-200:]
 
     n = len(dates)
     if n == 0:
@@ -617,7 +634,8 @@ def write_live_dashboard_html(
     pfig.update_layout(
         title=title,
         template="plotly_white",
-        height=900,
+        height=760,
+        margin=dict(l=40, r=20, t=70, b=20),
         legend=dict(orientation="h"),
         xaxis_rangeslider_visible=False,
     )
@@ -626,15 +644,15 @@ def write_live_dashboard_html(
     pfig.update_yaxes(title_text="signals", row=2, col=1)
     pfig.update_yaxes(range=[0.0, 1.0], row=2, col=1)
 
-    body = pfig.to_html(include_plotlyjs="cdn", full_html=False, config={"displayModeBar": True})
+    body = pfig.to_html(include_plotlyjs="cdn", full_html=False, config={"displayModeBar": True, "responsive": True})
     refresh = max(1, int(refresh_sec))
     html = (
         "<!doctype html><html><head><meta charset='utf-8'>"
         f"<meta http-equiv='refresh' content='{refresh}'>"
         f"<title>{symbol} live dashboard</title>"
         "<style>"
-        "body{margin:0;background:#fafafa;font-family:Arial,sans-serif;}"
-        ".wrap{padding:10px 12px;}"
+        "html,body{margin:0;height:100%;overflow:hidden;background:#fafafa;font-family:Arial,sans-serif;}"
+        ".wrap{height:100vh;box-sizing:border-box;padding:10px 12px;display:flex;flex-direction:column;overflow:hidden;}"
         ".meta{display:flex;flex-wrap:wrap;gap:10px;margin:6px 0 12px 0;}"
         ".card{background:#fff;border:1px solid #e6e6e6;border-radius:10px;padding:8px 10px;min-width:120px;box-shadow:0 1px 2px rgba(0,0,0,.03);}"
         ".label{font-size:11px;color:#777;text-transform:uppercase;letter-spacing:.04em;}"
@@ -650,7 +668,7 @@ def write_live_dashboard_html(
         f"<div class='card'><div class='label'>Cash</div><div class='value'>{cash_text}</div><div class='sub'>entry {entry_text}</div></div>"
         f"<div class='card'><div class='label'>Last Event</div><div class='value'>{latest_event.get('kind', '-')}</div><div class='sub'>{summary_ts}</div></div>"
         f"</div>"
-        f"{body}</div></body></html>"
+        f"<div style='flex:1;min-height:0;overflow:hidden'>{body}</div></div></body></html>"
     )
     html_path.parent.mkdir(parents=True, exist_ok=True)
     html_path.write_text(html, encoding="utf-8")
@@ -1120,6 +1138,7 @@ def main() -> None:
     dashboard_symbol = symbols[0]
     dashboard_indicator_cols = [c.strip() for c in str(args.live_dashboard_indicator_cols).split(",") if c.strip()]
     dashboard_state = build_live_dashboard_state(dashboard_indicator_cols)
+    dashboard_max_points = max(1, int(round(60 / max(1, args.bar_minutes))))
     startup_bars: Dict[str, List[Dict[str, str]]] = {}
     for symbol in symbols:
         try:
@@ -1170,6 +1189,7 @@ def main() -> None:
             score_threshold=float(args.ml_threshold),
             indicator_cols=dashboard_indicator_cols,
             refresh_sec=args.live_dashboard_refresh_sec,
+            max_points=dashboard_max_points,
         )
         emit(f"dashboard_saved={args.live_dashboard_html}", save=True)
     if args.dry_run:
@@ -1729,6 +1749,7 @@ def main() -> None:
                         score_threshold=float(args.ml_threshold),
                         indicator_cols=dashboard_indicator_cols,
                         refresh_sec=args.live_dashboard_refresh_sec,
+                        max_points=dashboard_max_points,
                     )
 
                 time.sleep(max(0, args.throttle_ms) / 1000.0)
