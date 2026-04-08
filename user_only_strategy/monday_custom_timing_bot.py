@@ -603,7 +603,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--scan-interval-sec", type=int, default=60)
     p.add_argument("--max-cycles", type=int, default=200)
     p.add_argument("--bar-minutes", type=int, choices=[1, 3, 5], default=5)
-    p.add_argument("--refresh-start-hhmm", type=int, default=800)
+    p.add_argument("--refresh-start-hhmm", type=int, default=700)
     p.add_argument("--refresh-end-hhmm", type=int, default=2000)
     p.add_argument("--refresh-interval-min", type=int, default=60)
     p.add_argument("--initial-cash", type=float, default=10_000_000, help="account seed cash for position sizing")
@@ -621,7 +621,7 @@ def parse_args() -> argparse.Namespace:
 
 def in_korean_regular_session(now: datetime) -> bool:
     hhmm = now.hour * 100 + now.minute
-    return now.weekday() < 5 and 800 <= hhmm <= 2000
+    return now.weekday() < 5 and 700 <= hhmm <= 2000
 
 
 def in_refresh_window(now: datetime, start_hhmm: int, end_hhmm: int) -> bool:
@@ -692,6 +692,37 @@ def main() -> None:
     filtered: List[Candidate] = []
     last_refresh: datetime | None = None
     positions: Dict[str, int] = {}
+
+    # If the bot is restarted during the refresh window, refresh immediately
+    # so users get candidate/selection telegram messages right away.
+    now0 = datetime.now(KST)
+    if in_refresh_window(now0, args.refresh_start_hhmm, args.refresh_end_hhmm):
+        universe = fetch_candidate_universe(
+            base_url=args.base_url,
+            token=token,
+            app_key=args.app_key,
+            app_secret=args.app_secret,
+            max_universe=args.max_universe,
+        )
+        notifier.send(f"?꾨낫 {len(universe)}媛?")
+        filtered = minute_filter(
+            base_url=args.base_url,
+            token=token,
+            app_key=args.app_key,
+            app_secret=args.app_secret,
+            universe=universe,
+            ma_converge_pct=args.ma_converge_pct,
+            ma60_no_break_days=args.ma60_no_break_days,
+            ma20_support_days=args.ma20_support_days,
+            bar_minutes=args.bar_minutes,
+        )
+        if not filtered:
+            notifier.send("議곌굔?듦낵 醫낅ぉ ?놁쓬")
+        else:
+            preview = ", ".join([f"{c.symbol}({c.name})" for c in filtered[:8]])
+            notifier.send(f"?좎젙 {len(filtered)}媛?| {preview}")
+        last_refresh = now0
+
     for cycle in range(max(1, args.max_cycles)):
         now = datetime.now(KST)
         if in_refresh_window(now, args.refresh_start_hhmm, args.refresh_end_hhmm):
