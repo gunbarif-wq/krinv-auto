@@ -1,4 +1,4 @@
-﻿# krinv-auto
+﻿# krinv-auto-mod
 
 ## 1) 오라클 클라우드(OCI) 준비
 처음 설치하는 기준으로 아래 순서대로 진행하세요.
@@ -7,7 +7,7 @@
 2. 좌측 상단 메뉴(햄버거) 클릭
 3. `Compute` -> `Instances` -> `Create instance`
 4. 인스턴스 설정
-   - Name: 예) `krinv-auto`
+   - Name: 예) `krinv-auto-mod`
    - Image: `Oracle Linux`(권장) 또는 `Ubuntu`
    - Shape: 무료 티어면 `VM.Standard.E2.1.Micro` 또는 사용 가능한 무료 Shape
 5. 네트워크 설정
@@ -45,13 +45,13 @@ cat ~/.ssh/id_ed25519.pub
 
 ### 2-2) SSH로 클론
 ```bash
-git clone git@github.com:osutaiko/krinv-auto.git
-cd krinv-auto
+git clone git@github.com:osutaiko/krinv-auto-mod.git
+cd krinv-auto-mod
 pip install -r requirements.txt
 ```
 
 ## 3) .env 설정
-프로젝트 루트(`krinv-auto`)에 `.env` 파일을 만들고 아래 값을 입력하세요.
+프로젝트 루트(`krinv-auto-mod`)에 `.env` 파일을 만들고 아래 값을 입력하세요.
 
 ```env
 KIS_APP_KEY=한투에서 받은 앱키
@@ -163,3 +163,4 @@ python ml_walkforward.py --data-root data/backtest_sets_047810_5y --symbol 04781
 ```bash
 python visualize_ml_trades.py --dataset-csv data/ml/047810/047810_test_ml.csv --model-path data/ml/047810/047810_model.pkl --hold-bars 20 --take-profit-pct 0.01 --output-png data/ml/047810/047810_trade_plot.png
 ```
+
