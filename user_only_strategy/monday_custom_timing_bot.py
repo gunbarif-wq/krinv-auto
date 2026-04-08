@@ -619,7 +619,7 @@ def parse_args() -> argparse.Namespace:
 
 def in_korean_regular_session(now: datetime) -> bool:
     hhmm = now.hour * 100 + now.minute
-    return now.weekday() < 5 and 900 <= hhmm <= 1530
+    return now.weekday() < 5 and 800 <= hhmm <= 2000
 
 
 def in_refresh_window(now: datetime, start_hhmm: int, end_hhmm: int) -> bool:
