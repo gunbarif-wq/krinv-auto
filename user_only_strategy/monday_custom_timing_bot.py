@@ -592,7 +592,7 @@ class Notifier:
 
 
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Monday-only custom timing bot (user rule only)")
+    p = argparse.ArgumentParser(description="Custom timing bot (user rule only)")
     p.add_argument("--base-url", default=os.getenv("KIS_BASE_URL", PROD_BASE_URL))
     p.add_argument("--app-key", default=os.getenv("KIS_APP_KEY", ""))
     p.add_argument("--app-secret", default=os.getenv("KIS_APP_SECRET", ""))
@@ -606,7 +606,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--refresh-start-hhmm", type=int, default=800)
     p.add_argument("--refresh-end-hhmm", type=int, default=2000)
     p.add_argument("--refresh-interval-min", type=int, default=60)
-    p.add_argument("--order-krw", type=float, default=300_000)
+    p.add_argument("--initial-cash", type=float, default=10_000_000, help="account seed cash for position sizing")
+    p.add_argument("--position-size-pct", type=float, default=0.20, help="max position size per symbol (0~1)")
+    p.add_argument("--order-krw", type=float, default=0.0, help="optional fixed order amount; 0 uses initial-cash * position-size-pct")
     p.add_argument("--ma-converge-pct", type=float, default=0.015)
     p.add_argument("--ma60-no-break-days", type=int, default=5, help="minute bars count for no-break check")
     p.add_argument("--ma20-support-days", type=int, default=3, help="minute bars count for MA20 support check")
@@ -706,7 +708,7 @@ def main() -> None:
                     app_secret=args.app_secret,
                     max_universe=args.max_universe,
                 )
-                notifier.send(f"universe_candidates={len(universe)}")
+                notifier.send(f"후보 {len(universe)}개")
                 filtered = minute_filter(
                     base_url=args.base_url,
                     token=token,
@@ -719,10 +721,10 @@ def main() -> None:
                     bar_minutes=args.bar_minutes,
                 )
                 if not filtered:
-                    notifier.send("no symbol passed minute filters")
+                    notifier.send("조건통과 종목 없음")
                 else:
-                    preview = ", ".join([f"{c.symbol}({c.name})" for c in filtered[:10]])
-                    notifier.send(f"minute_filter_pass={len(filtered)} symbols={preview}")
+                    preview = ", ".join([f"{c.symbol}({c.name})" for c in filtered[:8]])
+                    notifier.send(f"선정 {len(filtered)}개 | {preview}")
                 last_refresh = now
 
         if not in_korean_regular_session(now) or not filtered:
@@ -747,12 +749,16 @@ def main() -> None:
                 buy_ok, buy_reason = buy_signal_from_minute_bars(rows, adx_min=float(args.adx_min))
                 if not buy_ok:
                     continue
-                qty = int(max(0.0, args.order_krw) // max(1.0, close))
+                if float(args.order_krw) > 0:
+                    budget = float(args.order_krw)
+                else:
+                    budget = max(0.0, float(args.initial_cash) * min(1.0, max(0.0, float(args.position_size_pct))))
+                qty = int(max(0.0, budget) // max(1.0, close))
                 if qty <= 0:
-                    notifier.send(f"[BUY_SKIP] {c.symbol} qty=0 close={close:.0f}")
+                    notifier.send(f"매수스킵 {c.symbol} 수량0")
                     continue
                 if args.dry_run:
-                    notifier.send(f"[BUY] {c.symbol} {c.name} qty={qty} close={close:.0f} reason={buy_reason} dry_run=1")
+                    notifier.send(f"매수 {c.symbol} {c.name} {qty}주 {close:.0f}원 (DRY)")
                     positions[c.symbol] = qty
                 else:
                     res = place_order(
@@ -767,10 +773,10 @@ def main() -> None:
                         side="buy",
                     )
                     ok = str(res.get("rt_cd", "")) == "0"
-                    notifier.send(
-                        f"[BUY{'_OK' if ok else '_FAIL'}] {c.symbol} {c.name} qty={qty} close={close:.0f} "
-                        f"reason={buy_reason} msg={res.get('msg1', '')}"
-                    )
+                    if ok:
+                        notifier.send(f"매수완료 {c.symbol} {c.name} {qty}주 {close:.0f}원")
+                    else:
+                        notifier.send(f"매수실패 {c.symbol} {c.name} {qty}주 {close:.0f}원")
                     if ok:
                         positions[c.symbol] = qty
             else:
@@ -781,7 +787,7 @@ def main() -> None:
                 if qty <= 0:
                     continue
                 if args.dry_run:
-                    notifier.send(f"[SELL] {c.symbol} {c.name} qty={qty} close={close:.0f} reason={sell_reason} dry_run=1")
+                    notifier.send(f"매도 {c.symbol} {c.name} {qty}주 {close:.0f}원 (DRY)")
                     positions[c.symbol] = 0
                 else:
                     res = place_order(
@@ -796,10 +802,10 @@ def main() -> None:
                         side="sell",
                     )
                     ok = str(res.get("rt_cd", "")) == "0"
-                    notifier.send(
-                        f"[SELL{'_OK' if ok else '_FAIL'}] {c.symbol} {c.name} qty={qty} close={close:.0f} "
-                        f"reason={sell_reason} msg={res.get('msg1', '')}"
-                    )
+                    if ok:
+                        notifier.send(f"매도완료 {c.symbol} {c.name} {qty}주 {close:.0f}원")
+                    else:
+                        notifier.send(f"매도실패 {c.symbol} {c.name} {qty}주 {close:.0f}원")
                     if ok:
                         positions[c.symbol] = 0
         if cycle + 1 < args.max_cycles:
