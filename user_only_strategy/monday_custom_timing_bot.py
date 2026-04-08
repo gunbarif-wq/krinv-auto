@@ -672,7 +672,7 @@ def sell_signal_from_minute_bars(rows: List[Dict[str, float]]) -> Tuple[bool, st
         np.isfinite(rsi14[-1]) and np.isfinite(mid[-1]) and close[-1] < mid[-1] and rsi14[-1] < 50
     )
     ma20_break = np.isfinite(ma20[-1]) and close[-1] < ma20[-1]
-    ok = stoch_dead or dmi_dead or rsi_mid_break or ma20_break
+    ok = stoch_dead and dmi_dead and rsi_mid_break and ma20_break
     reason = f"stoch_dead={stoch_dead} dmi_dead={dmi_dead} rsi_mid_break={rsi_mid_break} ma20_break={ma20_break}"
     return ok, reason
 
