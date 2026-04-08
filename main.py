@@ -68,6 +68,15 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--interval-sec", type=int, default=0, help="main loop interval in seconds")
     p.add_argument("--bar-minutes", type=int, choices=[1, 3, 5], default=1, help="signal timeframe")
     p.add_argument("--startup-lookback-minutes", type=int, default=25, help="extra warmup minutes for startup/immediate trading")
+    p.add_argument("--startup-history-bars", type=int, default=120, help="max number of historical 1m bars to prefill at startup")
+    p.add_argument("--live-dashboard-html", default="data/ml/225190_1y/225190_live_dashboard.html", help="realtime html dashboard path")
+    p.add_argument("--live-dashboard-refresh-sec", type=int, default=5, help="browser refresh interval for the live dashboard")
+    p.add_argument("--live-dashboard-history-bars", type=int, default=300, help="max bars shown in the live dashboard")
+    p.add_argument(
+        "--live-dashboard-indicator-cols",
+        default="price_z20,price_z60,atr14_pct,ma_gap_10_20,vwap_gap_day",
+        help="comma separated feature columns to plot in the live dashboard",
+    )
     p.add_argument("--after-close-action", choices=["wait", "exit"], default="wait", help="behavior after market close")
     p.add_argument(
         "--strategy-mode",
@@ -152,7 +161,7 @@ def parse_args() -> argparse.Namespace:
         default=int(DEFAULT_POLICY.get("entry_start_hhmm", 900)) + 2,
         help="morning no-buy end (HHMM, exclusive)",
     )
-    p.add_argument("--dry-run", action="store_true", default=True, help="print only, no order requests")
+    p.add_argument("--dry-run", action="store_true", default=False, help="print only, no order requests")
     p.add_argument("--log-file", default="logs/realtime_events.txt", help="important event log path")
     p.add_argument("--log-rotate-minutes", type=int, default=1440, help="create a new log file every N minutes")
 
@@ -236,6 +245,427 @@ def get_minute_bars(
 
     rows_all.sort(key=lambda x: x.get("stck_cntg_hour", ""))
     return rows_all[-count_hint:]
+
+
+def load_startup_history_bars(
+    base_url: str,
+    token: str,
+    app_key: str,
+    app_secret: str,
+    symbol: str,
+    max_bars: int,
+) -> List[Dict[str, str]]:
+    limit = max(0, int(max_bars))
+    if limit <= 0:
+        return []
+    return get_minute_bars(
+        base_url=base_url,
+        token=token,
+        app_key=app_key,
+        app_secret=app_secret,
+        symbol=symbol,
+        count_hint=limit,
+        retry=3,
+    )
+
+
+def merge_unique_bars(existing: List[Dict[str, str]], fresh: List[Dict[str, str]]) -> List[Dict[str, str]]:
+    merged: Dict[str, Dict[str, str]] = {}
+    for r in existing + fresh:
+        d = str(r.get("stck_bsop_date", ""))
+        t = str(r.get("stck_cntg_hour", ""))
+        if d and t:
+            merged[f"{d}{t}"] = r
+    return [merged[k] for k in sorted(merged.keys())]
+
+
+def build_live_dashboard_state(indicator_cols: List[str]) -> Dict[str, object]:
+    return {
+        "dates": [],
+        "open": [],
+        "high": [],
+        "low": [],
+        "close": [],
+        "score": [],
+        "prob": [],
+        "alpha_raw": [],
+        "ret_pred": [],
+        "indicators": {c: [] for c in indicator_cols},
+        "alpha_raw_hist": [],
+        "events": [],
+        "summary": {},
+    }
+
+
+def sync_live_dashboard_state(
+    state: Dict[str, object],
+    ohlc: List[Dict[str, float]],
+    *,
+    feature_columns: List[str],
+    clf_model: Any,
+    reg_model: Any,
+    signal_mode: str,
+    alpha_ret_scale: float,
+    alpha_rank_window: int,
+    min_history_bars: int,
+    indicator_cols: List[str],
+) -> None:
+    dates: List[str] = state["dates"]  # type: ignore[assignment]
+    opens: List[float] = state["open"]  # type: ignore[assignment]
+    highs: List[float] = state["high"]  # type: ignore[assignment]
+    lows: List[float] = state["low"]  # type: ignore[assignment]
+    closes: List[float] = state["close"]  # type: ignore[assignment]
+    scores: List[float] = state["score"]  # type: ignore[assignment]
+    probs: List[float] = state["prob"]  # type: ignore[assignment]
+    alpha_raws: List[float] = state["alpha_raw"]  # type: ignore[assignment]
+    ret_preds: List[float] = state["ret_pred"]  # type: ignore[assignment]
+    alpha_hist: List[float] = state["alpha_raw_hist"]  # type: ignore[assignment]
+    indicators: Dict[str, List[float]] = state["indicators"]  # type: ignore[assignment]
+
+    start_i = len(dates)
+    if start_i > len(ohlc):
+        state["dates"] = []
+        state["open"] = []
+        state["high"] = []
+        state["low"] = []
+        state["close"] = []
+        state["score"] = []
+        state["prob"] = []
+        state["alpha_raw"] = []
+        state["ret_pred"] = []
+        state["alpha_raw_hist"] = []
+        state["indicators"] = {c: [] for c in indicator_cols}
+        return sync_live_dashboard_state(
+            state,
+            ohlc,
+            feature_columns=feature_columns,
+            clf_model=clf_model,
+            reg_model=reg_model,
+            signal_mode=signal_mode,
+            alpha_ret_scale=alpha_ret_scale,
+            alpha_rank_window=alpha_rank_window,
+            min_history_bars=min_history_bars,
+            indicator_cols=indicator_cols,
+        )
+
+    for i in range(start_i, len(ohlc)):
+        score, m = ml_signal_from_ohlc(
+            ohlc=ohlc[: i + 1],
+            feature_columns=feature_columns,
+            clf_model=clf_model,
+            reg_model=reg_model,
+            signal_mode=signal_mode,
+            alpha_ret_scale=alpha_ret_scale,
+            alpha_rank_window=alpha_rank_window,
+            alpha_raw_hist=alpha_hist,
+            min_history_bars=min_history_bars,
+        )
+        bar = ohlc[i]
+        dates.append(str(bar.get("date", "")))
+        opens.append(float(bar.get("open", 0.0)))
+        highs.append(float(bar.get("high", 0.0)))
+        lows.append(float(bar.get("low", 0.0)))
+        closes.append(float(bar.get("close", 0.0)))
+        scores.append(float(score) if score is not None else float("nan"))
+        probs.append(float(m.get("prob", float("nan"))))
+        alpha_raws.append(float(m.get("alpha_raw", float("nan"))))
+        ret_preds.append(float(m.get("ret_pred", float("nan"))))
+        snapshot = m.get("feature_snapshot", {})
+        if isinstance(snapshot, dict):
+            for c in indicator_cols:
+                indicators[c].append(float(snapshot.get(c, float("nan"))))
+        else:
+            for c in indicator_cols:
+                indicators[c].append(float("nan"))
+
+
+def update_live_dashboard_summary(
+    state: Dict[str, object],
+    *,
+    symbol: str,
+    price: float,
+    has_position: bool,
+    qty: int,
+    entry_price: float,
+    cash: float,
+    cooldown: int,
+    timestamp: str,
+) -> None:
+    state["summary"] = {
+        "symbol": symbol,
+        "price": float(price),
+        "position": "long" if has_position else "flat",
+        "qty": int(qty),
+        "entry_price": float(entry_price),
+        "cash": float(cash),
+        "cooldown": int(cooldown),
+        "timestamp": timestamp,
+        "unrealized_pct": ((float(price) / float(entry_price) - 1.0) if has_position and entry_price > 0 else float("nan")),
+    }
+
+
+def write_live_dashboard_html(
+    html_path: Path,
+    *,
+    symbol: str,
+    state: Dict[str, object],
+    policy_path: str,
+    score_threshold: float,
+    indicator_cols: List[str],
+    refresh_sec: int,
+) -> None:
+    try:
+        import plotly.graph_objects as go
+        from plotly.subplots import make_subplots
+    except Exception as e:
+        raise RuntimeError(f"plotly import failed: {e}")
+
+    dates: List[str] = state["dates"]  # type: ignore[assignment]
+    opens: List[float] = state["open"]  # type: ignore[assignment]
+    highs: List[float] = state["high"]  # type: ignore[assignment]
+    lows: List[float] = state["low"]  # type: ignore[assignment]
+    closes: List[float] = state["close"]  # type: ignore[assignment]
+    scores: List[float] = state["score"]  # type: ignore[assignment]
+    probs: List[float] = state["prob"]  # type: ignore[assignment]
+    alpha_raws: List[float] = state["alpha_raw"]  # type: ignore[assignment]
+    ret_preds: List[float] = state["ret_pred"]  # type: ignore[assignment]
+    indicators: Dict[str, List[float]] = state["indicators"]  # type: ignore[assignment]
+    events: List[Dict[str, object]] = state["events"]  # type: ignore[assignment]
+    summary: Dict[str, object] = state.get("summary", {})  # type: ignore[assignment]
+
+    n = len(dates)
+    if n == 0:
+        return
+    x_all = dates
+    pfig = make_subplots(
+        rows=2,
+        cols=1,
+        shared_xaxes=True,
+        vertical_spacing=0.06,
+        row_heights=[0.62, 0.38],
+        subplot_titles=(f"{symbol} Price + Trades", "Model / Indicators"),
+    )
+    pfig.add_trace(
+        go.Candlestick(
+            x=x_all,
+            open=opens,
+            high=highs,
+            low=lows,
+            close=closes,
+            name="candles",
+            increasing_line_color="#d62728",
+            increasing_fillcolor="#d62728",
+            decreasing_line_color="#1f77b4",
+            decreasing_fillcolor="#1f77b4",
+        ),
+        row=1,
+        col=1,
+    )
+
+    buy_x: List[str] = []
+    buy_y: List[float] = []
+    sell_x: List[str] = []
+    sell_y: List[float] = []
+    for ev in events:
+        dt = str(ev.get("date", ""))
+        px = float(ev.get("price", float("nan")))
+        if dt not in x_all:
+            continue
+        if str(ev.get("kind", "")) == "buy":
+            buy_x.append(dt)
+            buy_y.append(px)
+        elif str(ev.get("kind", "")) == "sell":
+            sell_x.append(dt)
+            sell_y.append(px)
+    if buy_x:
+        pfig.add_trace(
+            go.Scatter(
+                x=buy_x,
+                y=buy_y,
+                mode="markers",
+                name="buy",
+                marker=dict(symbol="triangle-up", size=11, color="#2ca02c"),
+            ),
+            row=1,
+            col=1,
+        )
+    if sell_x:
+        pfig.add_trace(
+            go.Scatter(
+                x=sell_x,
+                y=sell_y,
+                mode="markers",
+                name="sell",
+                marker=dict(symbol="triangle-down", size=11, color="#d62728"),
+            ),
+            row=1,
+            col=1,
+        )
+    pfig.add_trace(
+        go.Scatter(
+            x=x_all,
+            y=scores,
+            mode="lines",
+            name="model_score",
+            line=dict(width=1.2, color="#111111"),
+        ),
+        row=2,
+        col=1,
+    )
+    pfig.add_trace(
+        go.Scatter(
+            x=x_all,
+            y=probs,
+            mode="lines",
+            name="prob",
+            line=dict(width=1.0, color="#17becf"),
+        ),
+        row=2,
+        col=1,
+    )
+    pfig.add_trace(
+        go.Scatter(
+            x=x_all,
+            y=alpha_raws,
+            mode="lines",
+            name="alpha_raw",
+            line=dict(width=1.0, color="#9467bd"),
+        ),
+        row=2,
+        col=1,
+    )
+    pfig.add_trace(
+        go.Scatter(
+            x=x_all,
+            y=ret_preds,
+            mode="lines",
+            name="ret_pred",
+            line=dict(width=1.0, color="#8c564b"),
+        ),
+        row=2,
+        col=1,
+    )
+    pfig.add_trace(
+        go.Scatter(
+            x=x_all,
+            y=np.full(n, score_threshold, dtype=float),
+            mode="lines",
+            name=f"threshold={score_threshold:.2f}",
+            line=dict(width=1.3, dash="dash", color="#ff7f0e"),
+        ),
+        row=2,
+        col=1,
+    )
+    for c in indicator_cols:
+        vals = indicators.get(c, [])
+        if len(vals) != n:
+            continue
+        pfig.add_trace(
+            go.Scatter(
+                x=x_all,
+                y=safe_normalize_indicator(np.asarray(vals, dtype=float)),
+                mode="lines",
+                name=c,
+                line=dict(width=1.0),
+                opacity=0.85,
+                visible="legendonly",
+            ),
+            row=2,
+            col=1,
+        )
+
+    last_score = scores[-1] if scores else float("nan")
+    last_prob = probs[-1] if probs else float("nan")
+    last_alpha = alpha_raws[-1] if alpha_raws else float("nan")
+    last_close = closes[-1] if closes else float("nan")
+    latest_event = events[-1] if events else {}
+    summary_price = summary.get("price")
+    summary_position = summary.get("position", "flat")
+    summary_cash = summary.get("cash")
+    summary_qty = summary.get("qty")
+    summary_entry = summary.get("entry_price")
+    summary_cd = summary.get("cooldown")
+    summary_pnl = summary.get("unrealized_pct")
+    summary_ts = summary.get("timestamp", "")
+    summary_line = (
+        f"price={float(summary_price):.2f} " if isinstance(summary_price, (int, float)) and np.isfinite(float(summary_price)) else f"price={last_close:.2f} "
+    )
+    if isinstance(summary_cash, (int, float)) and np.isfinite(float(summary_cash)):
+        summary_line += f"cash={float(summary_cash):,.0f} "
+    if isinstance(summary_qty, (int, float)) and float(summary_qty) > 0:
+        summary_line += f"qty={int(summary_qty)} "
+    if isinstance(summary_entry, (int, float)) and np.isfinite(float(summary_entry)):
+        summary_line += f"entry={float(summary_entry):.2f} "
+    if isinstance(summary_pnl, (int, float)) and np.isfinite(float(summary_pnl)):
+        summary_line += f"unrealized={float(summary_pnl):+.2%} "
+    if isinstance(summary_cd, (int, float)):
+        summary_line += f"cd={int(summary_cd)} "
+    cash_text = "n/a"
+    if isinstance(summary_cash, (int, float)) and np.isfinite(float(summary_cash)):
+        cash_text = f"{float(summary_cash):,.0f} KRW"
+    entry_text = "n/a"
+    if isinstance(summary_entry, (int, float)) and np.isfinite(float(summary_entry)):
+        entry_text = f"{float(summary_entry):.2f}"
+    title = (
+        f"{symbol} live | score={last_score:.3f} prob={last_prob:.3f} alpha={last_alpha:.3f} "
+        f"thr={score_threshold:.2f} pos={summary_position} {summary_line} "
+        f"events={len(events)} last={latest_event.get('kind', '-')}"
+    )
+    pfig.update_layout(
+        title=title,
+        template="plotly_white",
+        height=900,
+        legend=dict(orientation="h"),
+        xaxis_rangeslider_visible=False,
+    )
+    pfig.update_xaxes(title_text="datetime", row=2, col=1)
+    pfig.update_yaxes(title_text="price", row=1, col=1)
+    pfig.update_yaxes(title_text="signals", row=2, col=1)
+    pfig.update_yaxes(range=[0.0, 1.0], row=2, col=1)
+
+    body = pfig.to_html(include_plotlyjs="cdn", full_html=False, config={"displayModeBar": True})
+    refresh = max(1, int(refresh_sec))
+    html = (
+        "<!doctype html><html><head><meta charset='utf-8'>"
+        f"<meta http-equiv='refresh' content='{refresh}'>"
+        f"<title>{symbol} live dashboard</title>"
+        "<style>"
+        "body{margin:0;background:#fafafa;font-family:Arial,sans-serif;}"
+        ".wrap{padding:10px 12px;}"
+        ".meta{display:flex;flex-wrap:wrap;gap:10px;margin:6px 0 12px 0;}"
+        ".card{background:#fff;border:1px solid #e6e6e6;border-radius:10px;padding:8px 10px;min-width:120px;box-shadow:0 1px 2px rgba(0,0,0,.03);}"
+        ".label{font-size:11px;color:#777;text-transform:uppercase;letter-spacing:.04em;}"
+        ".value{font-size:15px;color:#111;font-weight:700;margin-top:2px;}"
+        ".sub{font-size:12px;color:#666;margin-top:2px;}"
+        "</style>"
+        "</head><body><div class='wrap'>"
+        f"<div class='meta'>"
+        f"<div class='card'><div class='label'>Symbol</div><div class='value'>{symbol}</div><div class='sub'>{policy_path}</div></div>"
+        f"<div class='card'><div class='label'>Price</div><div class='value'>{last_close:.2f}</div><div class='sub'>threshold {score_threshold:.2f}</div></div>"
+        f"<div class='card'><div class='label'>Score</div><div class='value'>{last_score:.3f}</div><div class='sub'>prob {last_prob:.3f} / alpha {last_alpha:.3f}</div></div>"
+        f"<div class='card'><div class='label'>Position</div><div class='value'>{summary_position}</div><div class='sub'>qty {summary_qty if summary_qty is not None else 0} / cd {summary_cd if summary_cd is not None else 0}</div></div>"
+        f"<div class='card'><div class='label'>Cash</div><div class='value'>{cash_text}</div><div class='sub'>entry {entry_text}</div></div>"
+        f"<div class='card'><div class='label'>Last Event</div><div class='value'>{latest_event.get('kind', '-')}</div><div class='sub'>{summary_ts}</div></div>"
+        f"</div>"
+        f"{body}</div></body></html>"
+    )
+    html_path.parent.mkdir(parents=True, exist_ok=True)
+    html_path.write_text(html, encoding="utf-8")
+
+
+def safe_normalize_indicator(vals: np.ndarray) -> np.ndarray:
+    arr = np.asarray(vals, dtype=float)
+    out = np.full(arr.shape, 0.5, dtype=float)
+    finite_mask = np.isfinite(arr)
+    finite = arr[finite_mask]
+    if finite.size == 0:
+        return out
+    lo = float(np.nanpercentile(finite, 1))
+    hi = float(np.nanpercentile(finite, 99))
+    if not np.isfinite(lo) or not np.isfinite(hi) or hi - lo < 1e-12:
+        return out
+    out[finite_mask] = np.clip((arr[finite_mask] - lo) / (hi - lo), 0.0, 1.0)
+    return out
 
 
 def resample_ohlc(rows: List[Dict], bar_minutes: int) -> List[Dict[str, float]]:
@@ -378,6 +808,13 @@ def ml_signal_from_ohlc(
         "alpha_raw": alpha_raw,
         "ret_pred": ret_pred,
         "vwap_gap_day": float(last.get("vwap_gap_day", 0.0)),
+        "feature_snapshot": {
+            "price_z20": float(last.get("price_z20", 0.0)),
+            "price_z60": float(last.get("price_z60", 0.0)),
+            "atr14_pct": float(last.get("atr14_pct", 0.0)),
+            "ma_gap_10_20": float(last.get("ma_gap_10_20", 0.0)),
+            "vwap_gap_day": float(last.get("vwap_gap_day", 0.0)),
+        },
     }
 
 
@@ -387,6 +824,45 @@ def get_hashkey(base_url: str, app_key: str, app_secret: str, body: Dict) -> str
     r = requests.post(url, headers=headers, data=json.dumps(body), timeout=15)
     r.raise_for_status()
     return r.json().get("HASH", "")
+
+
+def request_json_with_retry(
+    method: str,
+    url: str,
+    *,
+    headers: Dict[str, str],
+    params: Dict[str, str],
+    timeout: int = 15,
+    retries: int = 3,
+    sleep_base: float = 0.6,
+) -> Dict:
+    last_err: Exception | None = None
+    for i in range(max(1, retries)):
+        try:
+            if method.lower() == "get":
+                r = requests.get(url, headers=headers, params=params, timeout=timeout)
+            else:
+                r = requests.post(url, headers=headers, data=json.dumps(params), timeout=timeout)
+            r.raise_for_status()
+            return r.json()
+        except Exception as e:
+            last_err = e
+            if i + 1 < retries:
+                time.sleep(sleep_base * (i + 1))
+    if last_err is not None:
+        raise last_err
+    raise RuntimeError("request failed")
+
+
+def is_demo_base_url(base_url: str) -> bool:
+    return "openapivts" in base_url.lower()
+
+
+def order_tr_id(base_url: str, side: str) -> str:
+    demo = is_demo_base_url(base_url)
+    if side.lower() == "buy":
+        return "VTTC0012U" if demo else "TTTC0012U"
+    return "VTTC0011U" if demo else "TTTC0011U"
 
 
 def place_order(
@@ -403,7 +879,7 @@ def place_order(
     if qty <= 0:
         return {"rt_cd": "1", "msg1": "qty<=0"}
     url = f"{base_url}/uapi/domestic-stock/v1/trading/order-cash"
-    tr_id = "VTTC0802U" if side == "buy" else "VTTC0801U"
+    tr_id = order_tr_id(base_url, side)
     body = {
         "CANO": cano,
         "ACNT_PRDT_CD": acnt_prdt_cd,
@@ -411,6 +887,7 @@ def place_order(
         "ORD_DVSN": "01",
         "ORD_QTY": str(qty),
         "ORD_UNPR": "0",
+        "EXCG_ID_DVSN_CD": "KRX",
     }
     hashkey = get_hashkey(base_url, app_key, app_secret, body)
     headers = {
@@ -426,7 +903,9 @@ def place_order(
     for i in range(4):  # first try + 3 retries
         try:
             r = requests.post(url, headers=headers, data=json.dumps(body), timeout=15)
-            r.raise_for_status()
+            if r.status_code >= 400:
+                snippet = r.text[:500].replace("\n", " ").strip()
+                raise RuntimeError(f"order failed status={r.status_code} body={snippet}")
             return r.json()
         except requests.RequestException as e:
             last_err = e
@@ -436,6 +915,12 @@ def place_order(
                 raise
             if i < 3:
                 time.sleep(0.6 * (i + 1))
+        except RuntimeError as e:
+            last_err = e
+            if i < 3 and "status=5" in str(e):
+                time.sleep(0.6 * (i + 1))
+                continue
+            raise
     if last_err is not None:
         raise last_err
     raise RuntimeError("unknown order error")
@@ -449,50 +934,44 @@ def get_orderable_cash(
     cano: str,
     acnt_prdt_cd: str,
 ) -> float:
-    # VTS cash balance inquiry. Field names can vary by account type, so parse defensively.
-    url = f"{base_url}/uapi/domestic-stock/v1/trading/inquire-balance"
+    # Orderable cash inquiry. Parse defensively because response fields vary by account type.
+    url = f"{base_url}/uapi/domestic-stock/v1/trading/inquire-psbl-order"
     headers = {
         "authorization": f"Bearer {token}",
         "appKey": app_key,
         "appSecret": app_secret,
-        "tr_id": "VTTC8434R",
+        "tr_id": "VTTC8908R" if is_demo_base_url(base_url) else "TTTC8908R",
         "custtype": "P",
     }
     params = {
         "CANO": cano,
         "ACNT_PRDT_CD": acnt_prdt_cd,
-        "AFHR_FLPR_YN": "N",
-        "OFL_YN": "",
-        "INQR_DVSN": "02",
-        "UNPR_DVSN": "01",
-        "FUND_STTL_ICLD_YN": "N",
-        "FNCG_AMT_AUTO_RDPT_YN": "N",
-        "PRCS_DVSN": "01",
-        "CTX_AREA_FK100": "",
-        "CTX_AREA_NK100": "",
+        "PDNO": "005930",
+        "ORD_DVSN": "01",
+        "ORD_QTY": "1",
+        "ORD_UNPR": "0",
     }
-    r = requests.get(url, headers=headers, params=params, timeout=15)
-    r.raise_for_status()
-    data = r.json()
+    data = request_json_with_retry("get", url, headers=headers, params=params, timeout=15, retries=3)
     if data.get("rt_cd") != "0":
         raise RuntimeError(f"balance inquiry failed: {data.get('msg1', '')}")
-    out2 = data.get("output2", {})
     candidates: List[Dict] = []
-    if isinstance(out2, dict):
-        candidates = [out2]
-    elif isinstance(out2, list):
-        candidates = [x for x in out2 if isinstance(x, dict)]
-
-    # Some responses keep cash fields in output1 as well.
+    out = data.get("output", {})
+    if isinstance(out, dict):
+        candidates = [out]
+    elif isinstance(out, list):
+        candidates = [x for x in out if isinstance(x, dict)]
+    # Keep fallback parsing for older/variant responses.
     out1 = data.get("output1", {})
-    if isinstance(out1, dict):
-        candidates.append(out1)
-    elif isinstance(out1, list):
-        candidates.extend([x for x in out1 if isinstance(x, dict)])
+    out2 = data.get("output2", {})
+    for extra in (out1, out2):
+        if isinstance(extra, dict):
+            candidates.append(extra)
+        elif isinstance(extra, list):
+            candidates.extend([x for x in extra if isinstance(x, dict)])
 
     # Only use cash-like fields. Do not use total valuation fields.
     for obj in candidates:
-        for key in ("ord_psbl_cash", "dnca_tot_amt", "prvs_rcdl_excc_amt"):
+        for key in ("ord_psbl_cash", "ord_psbl_cash_amt", "dnca_tot_amt", "prvs_rcdl_excc_amt"):
             v = obj.get(key)
             if v is not None and str(v).strip() != "":
                 try:
@@ -531,9 +1010,7 @@ def get_positions(
         "CTX_AREA_FK100": "",
         "CTX_AREA_NK100": "",
     }
-    r = requests.get(url, headers=headers, params=params, timeout=15)
-    r.raise_for_status()
-    data = r.json()
+    data = request_json_with_retry("get", url, headers=headers, params=params, timeout=15, retries=3)
     if data.get("rt_cd") != "0":
         raise RuntimeError(f"position inquiry failed: {data.get('msg1', '')}")
 
@@ -637,6 +1114,61 @@ def main() -> None:
         f"count_hint={count_hint}",
         save=True,
     )
+    dashboard_symbol = symbols[0]
+    dashboard_indicator_cols = [c.strip() for c in str(args.live_dashboard_indicator_cols).split(",") if c.strip()]
+    dashboard_state = build_live_dashboard_state(dashboard_indicator_cols)
+    startup_bars: Dict[str, List[Dict[str, str]]] = {}
+    for symbol in symbols:
+        try:
+            cached = load_startup_history_bars(
+                base_url=args.base_url,
+                token=token,
+                app_key=args.app_key,
+                app_secret=args.app_secret,
+                symbol=symbol,
+                max_bars=max(count_hint, args.startup_history_bars),
+            )
+            startup_bars[symbol] = cached
+            emit(f"startup_history={symbol} bars={len(cached)}", save=True)
+        except Exception as e:
+            startup_bars[symbol] = []
+            emit(f"[WARN] startup_history={symbol} skipped: {str(e)[:180]}", save=True)
+    startup_dashboard_ohlc = resample_ohlc(startup_bars.get(dashboard_symbol, []), args.bar_minutes)
+    if startup_dashboard_ohlc:
+        sync_live_dashboard_state(
+            dashboard_state,
+            startup_dashboard_ohlc,
+            feature_columns=ml_feature_columns,
+            clf_model=ml_model,
+            reg_model=ml_reg_model,
+            signal_mode=args.ml_signal_mode,
+            alpha_ret_scale=args.ml_alpha_ret_scale,
+            alpha_rank_window=args.ml_alpha_rank_window,
+            min_history_bars=args.ml_min_history_bars,
+            indicator_cols=dashboard_indicator_cols,
+        )
+        startup_last_px = float(startup_dashboard_ohlc[-1]["close"])
+        update_live_dashboard_summary(
+            dashboard_state,
+            symbol=dashboard_symbol,
+            price=startup_last_px,
+            has_position=has_position[dashboard_symbol],
+            qty=held_qty[dashboard_symbol],
+            entry_price=entry_price[dashboard_symbol],
+            cash=last_known_cash,
+            cooldown=cooldown_left[dashboard_symbol],
+            timestamp=str(startup_dashboard_ohlc[-1].get("date", "")),
+        )
+        write_live_dashboard_html(
+            Path(args.live_dashboard_html),
+            symbol=dashboard_symbol,
+            state=dashboard_state,
+            policy_path=str(DEFAULT_POLICY_PATH),
+            score_threshold=float(args.ml_threshold),
+            indicator_cols=dashboard_indicator_cols,
+            refresh_sec=args.live_dashboard_refresh_sec,
+        )
+        emit(f"dashboard_saved={args.live_dashboard_html}", save=True)
     if args.dry_run:
         emit(f"paper_cash={paper_cash:,.0f} KRW", save=True)
     else:
@@ -677,7 +1209,7 @@ def main() -> None:
             else:
                 emit("initial_positions=NONE", save=True)
         except Exception as e:
-            emit(f"initial_orderable_cash=ERROR ({str(e)[:200]})", save=True)
+            emit(f"initial_orderable_cash=WARN ({str(e)[:200]})", save=True)
             # Keep running in live mode with a conservative fallback when balance API is unstable.
             last_known_cash = float(args.paper_cash)
             predicted_cash = float(args.paper_cash)
@@ -708,7 +1240,7 @@ def main() -> None:
                 else:
                     emit("initial_positions=NONE", save=True)
             except Exception as pos_e:
-                emit(f"initial_positions=UNKNOWN ({str(pos_e)[:120]})", save=True)
+                emit(f"initial_positions=WARN ({str(pos_e)[:120]})", save=True)
 
     while True:
         try:
@@ -754,7 +1286,13 @@ def main() -> None:
                     time.sleep(max(0, args.throttle_ms) / 1000.0)
                     continue
 
-                ohlc = resample_ohlc(bars, args.bar_minutes)
+                if not bars:
+                    emit(f"[{ts}] {symbol} no live bars")
+                    time.sleep(max(0, args.throttle_ms) / 1000.0)
+                    continue
+
+                combined_bars = merge_unique_bars(startup_bars.get(symbol, []), bars)
+                ohlc = resample_ohlc(combined_bars, args.bar_minutes)
                 if not ohlc:
                     emit(f"[{ts}] {symbol} no data")
                     continue
@@ -969,6 +1507,16 @@ def main() -> None:
                                 save=True,
                             )
                     if qty > 0 and buy_filled:
+                        if symbol == dashboard_symbol:
+                            dashboard_state["events"].append(
+                                {
+                                    "date": bar_ts or "",
+                                    "kind": "buy",
+                                    "price": float(last_px),
+                                    "score": float(m.get("score", 0.0)),
+                                    "reason": buy_reason,
+                                }
+                            )
                         if args.dry_run:
                             paper_cash -= total_buy
                         else:
@@ -1037,6 +1585,16 @@ def main() -> None:
                     if not sell_filled:
                         time.sleep(max(0, args.throttle_ms) / 1000.0)
                         continue
+                    if symbol == dashboard_symbol:
+                        dashboard_state["events"].append(
+                            {
+                                "date": bar_ts or "",
+                                "kind": "sell",
+                                "price": float(last_px),
+                                "score": float(m.get("score", 0.0)),
+                                "reason": sell_reason,
+                            }
+                        )
                     if args.dry_run:
                         paper_cash += sell_net
                     else:
@@ -1135,6 +1693,40 @@ def main() -> None:
                         )
                     else:
                         cycle_summary.append(f"{symbol} score={m.get('score', 0):.2f}{cross_info} cd={cooldown_left[symbol]}")
+
+                if symbol == dashboard_symbol:
+                    update_live_dashboard_summary(
+                        dashboard_state,
+                        symbol=dashboard_symbol,
+                        price=last_px,
+                        has_position=has_position[symbol],
+                        qty=held_qty[symbol],
+                        entry_price=entry_price[symbol],
+                        cash=last_known_cash,
+                        cooldown=cooldown_left[symbol],
+                        timestamp=bar_ts,
+                    )
+                    sync_live_dashboard_state(
+                        dashboard_state,
+                        ohlc,
+                        feature_columns=ml_feature_columns,
+                        clf_model=ml_model,
+                        reg_model=ml_reg_model,
+                        signal_mode=args.ml_signal_mode,
+                        alpha_ret_scale=args.ml_alpha_ret_scale,
+                        alpha_rank_window=args.ml_alpha_rank_window,
+                        min_history_bars=args.ml_min_history_bars,
+                        indicator_cols=dashboard_indicator_cols,
+                    )
+                    write_live_dashboard_html(
+                        Path(args.live_dashboard_html),
+                        symbol=dashboard_symbol,
+                        state=dashboard_state,
+                        policy_path=str(DEFAULT_POLICY_PATH),
+                        score_threshold=float(args.ml_threshold),
+                        indicator_cols=dashboard_indicator_cols,
+                        refresh_sec=args.live_dashboard_refresh_sec,
+                    )
 
                 time.sleep(max(0, args.throttle_ms) / 1000.0)
             if cycle_summary:
