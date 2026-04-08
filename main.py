@@ -387,20 +387,23 @@ def update_live_dashboard_summary(
     has_position: bool,
     qty: int,
     entry_price: float,
-    cash: float,
+    cash: object,
     cooldown: int,
     timestamp: str,
 ) -> None:
+    cash_val = float(cash) if isinstance(cash, (int, float)) and np.isfinite(float(cash)) else float("nan")
+    entry_val = float(entry_price) if isinstance(entry_price, (int, float)) and np.isfinite(float(entry_price)) else float("nan")
+    price_val = float(price) if isinstance(price, (int, float)) and np.isfinite(float(price)) else float("nan")
     state["summary"] = {
         "symbol": symbol,
-        "price": float(price),
+        "price": price_val,
         "position": "long" if has_position else "flat",
         "qty": int(qty),
-        "entry_price": float(entry_price),
-        "cash": float(cash),
+        "entry_price": entry_val,
+        "cash": cash_val,
         "cooldown": int(cooldown),
         "timestamp": timestamp,
-        "unrealized_pct": ((float(price) / float(entry_price) - 1.0) if has_position and entry_price > 0 else float("nan")),
+        "unrealized_pct": ((price_val / entry_val - 1.0) if has_position and entry_val > 0 and np.isfinite(price_val) else float("nan")),
     }
 
 
