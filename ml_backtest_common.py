@@ -81,10 +81,11 @@ def run_policy(
             exit_reason: str | None = None
             held = i - pos.entry_i
             if held >= max(1, int(cfg.min_hold_bars)):
-                trailing_activate = max(float(cfg.trailing_activate_pct), float(cfg.trailing_stop_pct) * 1.5)
-                if (
+                if cfg.exit_threshold > 0 and float(prob[i]) <= float(cfg.exit_threshold):
+                    exit_reason = "score_drop"
+                elif (
                     cfg.trailing_stop_pct > 0
-                    and gross_ret >= trailing_activate
+                    and gross_ret >= max(float(cfg.trailing_activate_pct), float(cfg.trailing_stop_pct) * 1.5)
                     and dd_from_peak <= -cfg.trailing_stop_pct
                 ):
                     exit_reason = "trailing_stop"

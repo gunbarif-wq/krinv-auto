@@ -81,13 +81,13 @@ python main.py --dry-run
 - `--bar-minutes`: 봉 주기 (`1`, `3`, `5`)
 - `--interval-sec`: 장중 루프 주기(초)
 - `--entry-threshold`: 매수 점수 임계값
-- `--exit-threshold`: 매도 점수 임계값
 - `--entry-confirm-bars`: 연속 매수 신호 확정 횟수
-- `--exit-confirm-bars`: 연속 매도 신호 확정 횟수
 - `--min-hold-bars`: 최소 보유 봉 수
+- `--exit-threshold`: score-drop 청산 임계값
 - `--cooldown-bars`: 청산 후 재진입 대기 봉 수
-- `--stop-loss-pct`: 손절 비율
-- `--take-profit-pct`: 익절 비율
+- `--trailing-stop-pct`: 추세 훼손 시 청산하는 트레일링 스탑 비율
+- `--vwap-exit-min-hold-bars`: VWAP 이탈 청산 허용 최소 보유 봉 수
+- `--vwap-exit-max-profit-pct`: VWAP 이탈 청산을 허용할 최대 수익률
 - `--position-size-pct`: 종목당 최대 비중
 - `--cash-buffer-pct`: 현금 버퍼 비중
 - `--min-order-krw`: 최소 주문 금액
@@ -161,5 +161,5 @@ python ml_walkforward.py --data-root data/backtest_sets_047810_5y --symbol 04781
 
 매수/매도 시각화:
 ```bash
-python visualize_ml_trades.py --dataset-csv data/ml/047810/047810_test_ml.csv --model-path data/ml/047810/047810_model.pkl --hold-bars 20 --take-profit-pct 0.01 --stop-loss-pct 0.008 --output-png data/ml/047810/047810_trade_plot.png
+python visualize_ml_trades.py --dataset-csv data/ml/047810/047810_test_ml.csv --model-path data/ml/047810/047810_model.pkl --hold-bars 20 --take-profit-pct 0.01 --output-png data/ml/047810/047810_trade_plot.png
 ```

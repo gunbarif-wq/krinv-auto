@@ -26,16 +26,17 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--size-high-threshold", type=float, default=0.87)
     p.add_argument("--fee-roundtrip", type=float, default=0.004, help="roundtrip fee (relprice default)")
     p.add_argument("--min-hold-bars", type=int, default=5, help="minimum holding bars before any rule-based exit can happen")
+    p.add_argument("--exit-threshold", type=float, default=0.55, help="score-drop exit threshold")
     p.add_argument("--entry-start-hhmm", type=int, default=900)
     p.add_argument("--entry-end-hhmm", type=int, default=1530)
-    p.add_argument("--skip-open-min", type=int, default=20, help="skip first N minutes after 09:00")
-    p.add_argument("--skip-close-min", type=int, default=10, help="skip last N minutes before 15:30")
+    p.add_argument("--skip-open-min", type=int, default=9, help="skip first N minutes after 09:00")
+    p.add_argument("--skip-close-min", type=int, default=19, help="skip last N minutes before 15:30")
     p.add_argument("--loss-streak-for-cooldown", type=int, default=3, help="activate cooldown after N consecutive losses")
-    p.add_argument("--cooldown-bars", type=int, default=60, help="cooldown bars after loss streak trigger")
-    p.add_argument("--trailing-stop-pct", type=float, default=0.0)
-    p.add_argument("--trailing-activate-pct", type=float, default=0.0, help="activate trailing stop only after this profit pct")
-    p.add_argument("--vwap-exit-min-hold-bars", type=int, default=0, help="minimum bars held before vwap_break can exit")
-    p.add_argument("--vwap-exit-max-profit-pct", type=float, default=0.0, help="only allow vwap_break exit when profit is at or below this pct")
+    p.add_argument("--cooldown-bars", type=int, default=24, help="cooldown bars after loss streak trigger")
+    p.add_argument("--trailing-stop-pct", type=float, default=0.0073)
+    p.add_argument("--trailing-activate-pct", type=float, default=0.0155, help="activate trailing stop only after this profit pct")
+    p.add_argument("--vwap-exit-min-hold-bars", type=int, default=19, help="minimum bars held before vwap_break can exit")
+    p.add_argument("--vwap-exit-max-profit-pct", type=float, default=-0.0036, help="only allow vwap_break exit when profit is at or below this pct")
     p.add_argument("--max-concurrent-positions", type=int, default=1)
     p.add_argument("--position-size-pct", type=float, default=1.0, help="fallback fixed size if banded sizing is not configured")
     p.add_argument("--min-entry-gap-bars", type=int, default=0)
@@ -88,6 +89,7 @@ def main() -> None:
         threshold=threshold,
         fee_roundtrip=fee,
         min_hold_bars=args.min_hold_bars,
+        exit_threshold=args.exit_threshold,
         entry_start_hhmm=args.entry_start_hhmm,
         entry_end_hhmm=args.entry_end_hhmm,
         skip_open_min=args.skip_open_min,
@@ -125,6 +127,7 @@ def main() -> None:
         "size_mid_threshold": float(cfg.size_mid_threshold),
         "size_high_threshold": float(cfg.size_high_threshold),
         "min_hold_bars": int(cfg.min_hold_bars),
+        "exit_threshold": float(cfg.exit_threshold),
         "entry_start_hhmm": cfg.entry_start_hhmm,
         "entry_end_hhmm": cfg.entry_end_hhmm,
         "skip_open_min": cfg.skip_open_min,

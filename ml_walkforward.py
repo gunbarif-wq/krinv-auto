@@ -30,8 +30,8 @@ from train_ml_signal import class_weights
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Walk-forward ML training/validation/test with fixed policy parameters")
-    p.add_argument("--data-root", default="data/backtest_sets_047810_5y")
-    p.add_argument("--symbol", default="047810")
+    p.add_argument("--data-root", default="data/backtest_sets_225190_1y")
+    p.add_argument("--symbol", default="225190")
     p.add_argument("--model-kind", default="catboost", choices=["catboost", "logistic", "gboost", "hgb", "rf", "et", "auto"])
     p.add_argument("--model-top-k", type=int, default=2, help="use top-K quick-scored models for policy search")
     p.add_argument("--max-model-candidates", type=int, default=12, help="applies when model-kind=auto")
@@ -415,6 +415,7 @@ def main() -> None:
         skip_close_min=max(0, int(policy.get("skip_close_min", args.skip_close_min))),
         loss_streak_for_cooldown=max(0, int(policy.get("loss_streak_for_cooldown", args.loss_streak_for_cooldown))),
         cooldown_bars=max(0, int(policy.get("cooldown_bars", args.cooldown_bars))),
+        exit_threshold=max(0.0, float(policy.get("exit_threshold", args.exit_threshold))),
         trailing_stop_pct=max(0.0, float(policy.get("trailing_stop_pct", args.trailing_stop_pct))),
         trailing_activate_pct=max(0.0, float(policy.get("trailing_activate_pct", 0.0))),
         vwap_exit_min_hold_bars=max(0, int(policy.get("vwap_exit_min_hold_bars", 0))),

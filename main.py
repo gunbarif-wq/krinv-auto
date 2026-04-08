@@ -16,23 +16,13 @@ import numpy as np
 
 from fetch_kis_daily import get_access_token
 from build_ml_dataset import build_rows
+from ml_signal_common import load_json
 
 
 VTS_BASE_URL = "https://openapivts.koreainvestment.com:29443"
-DEFAULT_SYMBOLS = [
-    # Defense (5)
-    "012450",  # Hanwha Aerospace
-    "079550",  # LIG Nex1
-    "047810",  # KAI
-    "272210",  # Hanwha Systems
-    "103140",  # Poongsan
-    # Space (5)
-    "099320",  # SATREC INITIATIVE
-    "211270",  # AP Satellite
-    "274090",  # Kenko Aerospace
-    "214270",  # Genohco
-    "271940",  # ILJIN Hysolus (aerospace supply-chain proxy)
-]
+DEFAULT_POLICY_PATH = Path("data/ml/225190_1y/225190_fast_policy.json")
+DEFAULT_POLICY = load_json(DEFAULT_POLICY_PATH)
+DEFAULT_SYMBOLS = [str(DEFAULT_POLICY.get("symbol", "225190"))]
 KST = ZoneInfo("Asia/Seoul")
 
 
@@ -74,7 +64,7 @@ def load_dotenv(dotenv_path: str = ".env") -> None:
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="KIS realtime paper trader (ML-only)")
-    p.add_argument("--symbols", default="047810", help="comma-separated symbols")
+    p.add_argument("--symbols", default="225190", help="comma-separated symbols")
     p.add_argument("--interval-sec", type=int, default=0, help="main loop interval in seconds")
     p.add_argument("--bar-minutes", type=int, choices=[1, 3, 5], default=1, help="signal timeframe")
     p.add_argument("--startup-lookback-minutes", type=int, default=25, help="extra warmup minutes for startup/immediate trading")
@@ -87,35 +77,81 @@ def parse_args() -> argparse.Namespace:
     )
 
     # ML signal parameters
-    p.add_argument("--ml-model-path", default="data/ml/047810/047810_model.pkl", help="trained ML model bundle path")
-    p.add_argument("--ml-threshold", type=float, default=0.60, help="entry threshold for ML alpha/prob score")
-    p.add_argument("--ml-signal-mode", choices=["alpha", "prob"], default="alpha", help="ml signal score mode")
+    p.add_argument(
+        "--ml-model-path",
+        default=str(DEFAULT_POLICY.get("model_path", "data/ml/225190_1y/225190_model_fast.pkl")),
+        help="trained ML model bundle path",
+    )
+    p.add_argument(
+        "--ml-threshold",
+        type=float,
+        default=float(DEFAULT_POLICY.get("threshold", 0.8665617667145)),
+        help="entry threshold for ML alpha/prob score",
+    )
+    p.add_argument("--ml-signal-mode", choices=["alpha", "prob"], default="prob", help="ml signal score mode")
     p.add_argument("--ml-alpha-ret-scale", type=float, default=0.004, help="sigmoid scale for expected return in alpha mode")
     p.add_argument("--ml-alpha-rank-window", type=int, default=180, help="rolling rank window for alpha mode")
-    p.add_argument("--ml-hold-bars", type=int, default=16, help="timeout exit bars for ML mode")
+    p.add_argument("--ml-hold-bars", type=int, default=5, help="timeout exit bars for ML mode")
+    p.add_argument(
+        "--exit-threshold",
+        type=float,
+        default=float(DEFAULT_POLICY.get("exit_threshold", 0.5312432671588239)),
+        help="score-drop exit threshold",
+    )
+    p.add_argument(
+        "--vwap-exit-min-hold-bars",
+        type=int,
+        default=int(DEFAULT_POLICY.get("vwap_exit_min_hold_bars", 4)),
+        help="minimum bars held before VWAP-break exit is allowed",
+    )
+    p.add_argument(
+        "--vwap-exit-max-profit-pct",
+        type=float,
+        default=float(DEFAULT_POLICY.get("vwap_exit_max_profit_pct", -0.002506087866765109)),
+        help="only allow VWAP-break exit when profit is at or below this pct",
+    )
     p.add_argument("--ml-feature-warmup-bars", type=int, default=120, help="minimum bars for ML feature extraction")
-    p.add_argument("--ml-entry-gap-bars", type=int, default=2, help="minimum bars between entries in ML mode")
-    p.add_argument("--trailing-stop-pct", type=float, default=0.004, help="trailing stop ratio")
+    p.add_argument("--ml-min-history-bars", type=int, default=30, help="minimum same-day history bars for feature rows")
+    p.add_argument("--ml-entry-gap-bars", type=int, default=0, help="minimum bars between entries in ML mode")
+    p.add_argument(
+        "--trailing-stop-pct",
+        type=float,
+        default=float(DEFAULT_POLICY.get("trailing_stop_pct", 0.004293934920684575)),
+        help="trailing stop ratio",
+    )
 
     # Risk and execution
-    p.add_argument("--cash-buffer-pct", type=float, default=0.10, help="keep this cash ratio unused")
-    p.add_argument("--stop-loss-pct", type=float, default=0.005, help="stop-loss ratio")
-    p.add_argument("--take-profit-pct", type=float, default=0.020, help="take-profit ratio")
+    p.add_argument("--cash-buffer-pct", type=float, default=0.0, help="keep this cash ratio unused")
     p.add_argument("--fee-rate", type=float, default=0.0005, help="fee rate for sizing/pnl")
     p.add_argument("--paper-cash", type=float, default=10_000_000, help="fallback paper cash when balance inquiry fails")
-    p.add_argument("--max-invested-pct", type=float, default=0.30, help="max total invested fraction of portfolio equity")
-    p.add_argument("--max-positions", type=int, default=4, help="max number of concurrent positions")
+    p.add_argument(
+        "--max-invested-pct",
+        type=float,
+        default=float(DEFAULT_POLICY.get("position_size_pct", 0.5)),
+        help="max total invested fraction of portfolio equity",
+    )
+    p.add_argument(
+        "--max-positions",
+        type=int,
+        default=int(DEFAULT_POLICY.get("max_concurrent_positions", 1)),
+        help="max number of concurrent positions",
+    )
     p.add_argument("--min-order-krw", type=float, default=150_000, help="skip buy when target order value is below this amount")
     p.add_argument("--retry", type=int, default=3, help="quote retry count")
     p.add_argument("--throttle-ms", type=int, default=800, help="delay between symbols in milliseconds")
     p.add_argument(
         "--no-buy-before-close-min",
         type=int,
-        default=35,
+        default=int(DEFAULT_POLICY.get("skip_close_min", 20)),
         help="block new buys during last N minutes before market close",
     )
     p.add_argument("--no-buy-morning-start-hhmm", type=int, default=900, help="morning no-buy start (HHMM)")
-    p.add_argument("--no-buy-morning-end-hhmm", type=int, default=930, help="morning no-buy end (HHMM, exclusive)")
+    p.add_argument(
+        "--no-buy-morning-end-hhmm",
+        type=int,
+        default=int(DEFAULT_POLICY.get("entry_start_hhmm", 900)) + 2,
+        help="morning no-buy end (HHMM, exclusive)",
+    )
     p.add_argument("--dry-run", action="store_true", default=True, help="print only, no order requests")
     p.add_argument("--log-file", default="logs/realtime_events.txt", help="important event log path")
     p.add_argument("--log-rotate-minutes", type=int, default=1440, help="create a new log file every N minutes")
@@ -283,6 +319,7 @@ def ml_signal_from_ohlc(
     alpha_ret_scale: float,
     alpha_rank_window: int,
     alpha_raw_hist: List[float],
+    min_history_bars: int,
 ) -> tuple[float | None, Dict[str, float]]:
     if len(ohlc) < 70:
         return None, {"score": 0.0}
@@ -297,6 +334,7 @@ def ml_signal_from_ohlc(
     rows = build_rows(
         data=data,
         horizon=1,
+        min_history_bars=max(30, int(min_history_bars)),
         label_mode="fixed",
         up_threshold=0.01,
         down_threshold=0.01,
@@ -314,7 +352,13 @@ def ml_signal_from_ohlc(
 
     prob = float(clf_model.predict_proba(x)[0, 1])  # type: ignore[attr-defined]
     if signal_mode == "prob":
-        return prob, {"score": prob, "prob": prob, "alpha_raw": prob, "ret_pred": 0.0}
+        return prob, {
+            "score": prob,
+            "prob": prob,
+            "alpha_raw": prob,
+            "ret_pred": 0.0,
+            "vwap_gap_day": float(last.get("vwap_gap_day", 0.0)),
+        }
 
     ret_pred = float(reg_model.predict(x)[0]) if reg_model is not None else 0.0
     if reg_model is None:
@@ -328,7 +372,13 @@ def ml_signal_from_ohlc(
         del alpha_raw_hist[: len(alpha_raw_hist) - (w * 3)]
     recent = alpha_raw_hist[-w:]
     score = _rolling_rank_01(recent, alpha_raw)
-    return score, {"score": score, "prob": prob, "alpha_raw": alpha_raw, "ret_pred": ret_pred}
+    return score, {
+        "score": score,
+        "prob": prob,
+        "alpha_raw": alpha_raw,
+        "ret_pred": ret_pred,
+        "vwap_gap_day": float(last.get("vwap_gap_day", 0.0)),
+    }
 
 
 def get_hashkey(base_url: str, app_key: str, app_secret: str, body: Dict) -> str:
@@ -582,8 +632,8 @@ def main() -> None:
     emit(
         f"symbols={','.join(symbols)} dry_run={args.dry_run} bar={args.bar_minutes}m "
         f"model={args.strategy_mode}(signal={args.ml_signal_mode},thr={args.ml_threshold:.2f},"
-        f"hold={args.ml_hold_bars},tp={args.take_profit_pct:.4f},sl={args.stop_loss_pct:.4f},"
-        f"trail={args.trailing_stop_pct:.4f}) "
+        f"hold={args.ml_hold_bars},exit_thr={args.exit_threshold:.2f},trail={args.trailing_stop_pct:.4f},"
+        f"vwap_hold={args.vwap_exit_min_hold_bars},vwap_max_profit={args.vwap_exit_max_profit_pct:.4f}) "
         f"count_hint={count_hint}",
         save=True,
     )
@@ -734,6 +784,7 @@ def main() -> None:
                     alpha_ret_scale=args.ml_alpha_ret_scale,
                     alpha_rank_window=args.ml_alpha_rank_window,
                     alpha_raw_hist=alpha_raw_hist[symbol],
+                    min_history_bars=args.ml_min_history_bars,
                 )
                 if score is None or len(ohlc) < max(70, int(args.ml_feature_warmup_bars)):
                     cycle_summary.append(f"{symbol} score=NA warmup")
@@ -752,18 +803,28 @@ def main() -> None:
                     dd_from_peak = (
                         (last_px / peak_price[symbol] - 1.0) if peak_price[symbol] > 0 else 0.0
                     )
+                    vwap_gap_day = float(m.get("vwap_gap_day", 0.0))
                     if hard_liquidation_window:
                         signal = -1
                         sell_reason = "hard_close"
-                    elif args.stop_loss_pct > 0 and gross_ret <= -args.stop_loss_pct:
+                    elif score is not None and float(score) <= float(args.exit_threshold):
                         signal = -1
-                        sell_reason = "stop_loss"
-                    elif args.take_profit_pct > 0 and gross_ret >= args.take_profit_pct:
-                        signal = -1
-                        sell_reason = "take_profit"
-                    elif args.trailing_stop_pct > 0 and dd_from_peak <= -args.trailing_stop_pct:
+                        sell_reason = "score_drop"
+                    elif (
+                        args.trailing_stop_pct > 0
+                        and gross_ret >= max(0.0, args.trailing_stop_pct * 1.5)
+                        and dd_from_peak <= -args.trailing_stop_pct
+                    ):
                         signal = -1
                         sell_reason = "trailing_stop"
+                    elif (
+                        args.vwap_exit_min_hold_bars > 0
+                        and held_bars[symbol] >= max(1, int(args.vwap_exit_min_hold_bars))
+                        and vwap_gap_day <= 0.0
+                        and gross_ret <= float(args.vwap_exit_max_profit_pct)
+                    ):
+                        signal = -1
+                        sell_reason = "vwap_break"
                     elif held_bars[symbol] >= max(1, int(args.ml_hold_bars)):
                         signal = -1
                         sell_reason = "timeout"

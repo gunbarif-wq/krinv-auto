@@ -35,6 +35,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--trailing-activate-range", default="0.004,0.020", help="min,max profit pct before trailing stop activates")
     p.add_argument("--vwap-exit-hold-range", default="0,20", help="min,max bars held before vwap exit is allowed")
     p.add_argument("--vwap-exit-profit-range", default="-0.010,0.005", help="min,max profit pct allowed for vwap exit")
+    p.add_argument("--exit-threshold-range", default="0.45,0.65", help="min,max score-drop exit threshold")
     p.add_argument("--entry-start-hhmm", type=int, default=900)
     p.add_argument("--entry-end-hhmm", type=int, default=1530)
     p.add_argument("--min-hold-bars", type=int, default=5)
@@ -112,6 +113,7 @@ def main() -> None:
     trail_act_spec = parse_float_spec(args.trailing_activate_range)
     vwap_hold_spec = parse_int_spec(args.vwap_exit_hold_range)
     vwap_profit_spec = parse_float_spec(args.vwap_exit_profit_range)
+    exit_thr_spec = parse_float_spec(args.exit_threshold_range)
 
     def sample_float_spec(spec: Dict[str, object]) -> float:
         if spec["kind"] == "range":
@@ -129,9 +131,20 @@ def main() -> None:
 
     use_sampling = any(
         spec["kind"] == "range"
-        for spec in [thr_spec, open_spec, close_spec, streak_spec, cooldown_spec, trail_spec, trail_act_spec, vwap_hold_spec, vwap_profit_spec]
+        for spec in [
+            thr_spec,
+            open_spec,
+            close_spec,
+            streak_spec,
+            cooldown_spec,
+            trail_spec,
+            trail_act_spec,
+            vwap_hold_spec,
+            vwap_profit_spec,
+            exit_thr_spec,
+        ]
     )
-    combos: List[Tuple[float, int, int, int, int, float, float, int, float]] = []
+    combos: List[Tuple[float, int, int, int, int, float, float, int, float, float]] = []
     if use_sampling:
         sample_n = args.max_evals if args.max_evals > 0 else 1500
         for _ in range(sample_n):
@@ -146,6 +159,7 @@ def main() -> None:
                     sample_float_spec(trail_act_spec),
                     sample_int_spec(vwap_hold_spec),
                     sample_float_spec(vwap_profit_spec),
+                    sample_float_spec(exit_thr_spec),
                 )
             )
     else:
@@ -158,7 +172,21 @@ def main() -> None:
         trail_act_grid = list(trail_act_spec["values"])  # type: ignore[index]
         vwap_hold_grid = list(vwap_hold_spec["values"])  # type: ignore[index]
         vwap_profit_grid = list(vwap_profit_spec["values"])  # type: ignore[index]
-        combos = list(itertools.product(thr_grid, open_grid, close_grid, streak_grid, cooldown_grid, trail_grid, trail_act_grid, vwap_hold_grid, vwap_profit_grid))
+        exit_thr_grid = list(exit_thr_spec["values"])  # type: ignore[index]
+        combos = list(
+            itertools.product(
+                thr_grid,
+                open_grid,
+                close_grid,
+                streak_grid,
+                cooldown_grid,
+                trail_grid,
+                trail_act_grid,
+                vwap_hold_grid,
+                vwap_profit_grid,
+                exit_thr_grid,
+            )
+        )
         if len(combos) > args.max_evals > 0:
             combos = rng.sample(combos, k=args.max_evals)
 
@@ -168,7 +196,7 @@ def main() -> None:
     best_test: Dict[str, float | int | str | None] | None = None
 
     checked = 0
-    for thr, skip_open, skip_close, streak, cooldown, trail, trail_act, vwap_hold, vwap_profit in combos:
+    for thr, skip_open, skip_close, streak, cooldown, trail, trail_act, vwap_hold, vwap_profit, exit_thr in combos:
         if streak <= 0:
             cooldown = 0
         if streak > 0 and cooldown <= 0:
@@ -189,6 +217,7 @@ def main() -> None:
             trailing_activate_pct=max(0.0, float(trail_act)),
             vwap_exit_min_hold_bars=max(0, int(vwap_hold)),
             vwap_exit_max_profit_pct=float(vwap_profit),
+            exit_threshold=max(0.0, float(exit_thr)),
         )
         val_result = run_policy(
             prob=p_val,
@@ -249,6 +278,7 @@ def main() -> None:
             "trailing_activate_pct": best_cfg.trailing_activate_pct,
             "vwap_exit_min_hold_bars": best_cfg.vwap_exit_min_hold_bars,
             "vwap_exit_max_profit_pct": best_cfg.vwap_exit_max_profit_pct,
+            "exit_threshold": best_cfg.exit_threshold,
         },
         "best_val": best_val,
         "best_test": best_test,
@@ -272,6 +302,7 @@ def main() -> None:
         "trailing_activate_pct": best_cfg.trailing_activate_pct,
         "vwap_exit_min_hold_bars": best_cfg.vwap_exit_min_hold_bars,
         "vwap_exit_max_profit_pct": best_cfg.vwap_exit_max_profit_pct,
+        "exit_threshold": best_cfg.exit_threshold,
     }
 
     out = Path(args.report_out)

@@ -40,7 +40,7 @@ def parse_args() -> argparse.Namespace:
         description="Fetch 1m data and prepare train/val/test backtest datasets in one run"
     )
     p.add_argument("--symbols", default=",".join(DEFAULT_SYMBOLS), help="comma-separated symbols")
-    p.add_argument("--business-days", type=int, default=2000, help="number of business days to fetch")
+    p.add_argument("--business-days", type=int, default=30, help="number of business days to fetch")
     p.add_argument("--include-today", action="store_true", default=True, help="include today's data")
     p.add_argument("--train-ratio", type=float, default=0.7, help="train split ratio by time")
     p.add_argument("--val-ratio", type=float, default=0.15, help="validation split ratio by time")

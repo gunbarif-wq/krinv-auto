@@ -41,16 +41,17 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--indicator-window", type=int, default=120, help="window for local_rank01")
     p.add_argument("--score-threshold", type=float, default=None, help="0..1 threshold line (default: use strategy threshold)")
     p.add_argument("--min-hold-bars", type=int, default=5)
-    p.add_argument("--trailing-stop-pct", type=float, default=0.0)
+    p.add_argument("--exit-threshold", type=float, default=0.55)
+    p.add_argument("--trailing-stop-pct", type=float, default=0.0073)
     p.add_argument("--max-concurrent-positions", type=int, default=1)
     p.add_argument("--position-size-pct", type=float, default=1.0)
     p.add_argument("--min-entry-gap-bars", type=int, default=0)
     p.add_argument("--entry-start-hhmm", type=int, default=900)
     p.add_argument("--entry-end-hhmm", type=int, default=1530)
-    p.add_argument("--skip-open-min", type=int, default=20)
-    p.add_argument("--skip-close-min", type=int, default=10)
+    p.add_argument("--skip-open-min", type=int, default=9)
+    p.add_argument("--skip-close-min", type=int, default=19)
     p.add_argument("--loss-streak-for-cooldown", type=int, default=3)
-    p.add_argument("--cooldown-bars", type=int, default=60)
+    p.add_argument("--cooldown-bars", type=int, default=24)
     p.add_argument("--initial-cash", type=float, default=10_000_000)
     p.add_argument("--start-datetime", default="", help="inclusive, e.g. 2026-03-01 or 2026-03-01 09:00:00")
     p.add_argument("--end-datetime", default="", help="inclusive, e.g. 2026-03-14 or 2026-03-14 15:30:00")
@@ -181,6 +182,7 @@ def main() -> None:
         threshold=threshold,
         fee_roundtrip=fee,
         min_hold_bars=args.min_hold_bars,
+        exit_threshold=args.exit_threshold,
         entry_start_hhmm=args.entry_start_hhmm,
         entry_end_hhmm=args.entry_end_hhmm,
         skip_open_min=args.skip_open_min,
