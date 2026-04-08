@@ -704,7 +704,7 @@ def main() -> None:
             app_secret=args.app_secret,
             max_universe=args.max_universe,
         )
-        notifier.send(f"?꾨낫 {len(universe)}媛?")
+        notifier.send(f"후보 {len(universe)}개")
         filtered = minute_filter(
             base_url=args.base_url,
             token=token,
@@ -717,10 +717,10 @@ def main() -> None:
             bar_minutes=args.bar_minutes,
         )
         if not filtered:
-            notifier.send("議곌굔?듦낵 醫낅ぉ ?놁쓬")
+            notifier.send("조건통과 종목 없음")
         else:
             preview = ", ".join([f"{c.symbol}({c.name})" for c in filtered[:8]])
-            notifier.send(f"?좎젙 {len(filtered)}媛?| {preview}")
+            notifier.send(f"선정 {len(filtered)}개 | {preview}")
         last_refresh = now0
 
     for cycle in range(max(1, args.max_cycles)):
