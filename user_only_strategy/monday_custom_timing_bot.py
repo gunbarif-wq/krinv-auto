@@ -284,6 +284,18 @@ def format_candidate_preview(universe: List[Tuple[str, str]], limit: int = 9999)
     return ", ".join(out)
 
 
+def send_candidate_list_messages(notifier: "Notifier", universe: List[Tuple[str, str]], chunk_size: int = 25) -> None:
+    names = [(name if name else symbol) for symbol, name in universe]
+    if not names:
+        return
+    total_parts = (len(names) + max(1, int(chunk_size)) - 1) // max(1, int(chunk_size))
+    for i in range(total_parts):
+        start = i * chunk_size
+        end = min(len(names), start + chunk_size)
+        part = ", ".join(names[start:end])
+        notifier.send(f"후보리스트 {i + 1}/{total_parts} | {part}")
+
+
 def fallback_candidate_from_universe(universe: List[Tuple[str, str]]) -> Candidate | None:
     if not universe:
         return None
@@ -748,7 +760,7 @@ def main() -> None:
         )
         notifier.send(f"후보 {len(universe)}개")
         if universe:
-            notifier.send(f"후보리스트 {len(universe)}개 | {format_candidate_preview(universe, len(universe))}")
+            send_candidate_list_messages(notifier, universe, chunk_size=25)
         filtered, nearest = minute_filter(
             base_url=args.base_url,
             token=token,
@@ -794,7 +806,7 @@ def main() -> None:
                 )
                 notifier.send(f"후보 {len(universe)}개")
                 if universe:
-                    notifier.send(f"후보리스트 {len(universe)}개 | {format_candidate_preview(universe, len(universe))}")
+                    send_candidate_list_messages(notifier, universe, chunk_size=25)
                 filtered, nearest = minute_filter(
                     base_url=args.base_url,
                     token=token,
