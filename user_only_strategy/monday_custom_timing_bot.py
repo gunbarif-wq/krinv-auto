@@ -306,7 +306,14 @@ def fetch_minute_ohlcv(
             "FID_INPUT_HOUR_1": cursor_time,
             "FID_PW_DATA_INCU_YN": "N",
         }
-        data = request_json_with_retry("get", url, headers=headers, params=params, timeout=15, retries=3)
+        try:
+            data = request_json_with_retry("get", url, headers=headers, params=params, timeout=15, retries=3)
+        except Exception as e:
+            print(f"[WARN] minute_ohlcv_skip symbol={symbol} time={cursor_time} err={e}")
+            break
+        if str(data.get("rt_cd", "0")) not in {"0", ""}:
+            print(f"[WARN] minute_ohlcv_rtcd symbol={symbol} time={cursor_time} rt_cd={data.get('rt_cd')} msg={data.get('msg1', '')}")
+            break
         rows = data.get("output2", [])
         if not isinstance(rows, list) or not rows:
             break
@@ -606,6 +613,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--refresh-start-hhmm", type=int, default=700)
     p.add_argument("--refresh-end-hhmm", type=int, default=2000)
     p.add_argument("--refresh-interval-min", type=int, default=60)
+    p.add_argument("--empty-refresh-interval-min", type=int, default=10, help="refresh interval when no symbol passed filters")
     p.add_argument("--initial-cash", type=float, default=10_000_000, help="account seed cash for position sizing")
     p.add_argument("--position-size-pct", type=float, default=0.20, help="max position size per symbol (0~1)")
     p.add_argument("--order-krw", type=float, default=0.0, help="optional fixed order amount; 0 uses initial-cash * position-size-pct")
@@ -729,7 +737,8 @@ def main() -> None:
             need_refresh = last_refresh is None
             if last_refresh is not None:
                 elapsed = (now - last_refresh).total_seconds() / 60.0
-                if elapsed >= max(1, int(args.refresh_interval_min)):
+                refresh_interval_min = int(args.refresh_interval_min) if filtered else int(args.empty_refresh_interval_min)
+                if elapsed >= max(1, refresh_interval_min):
                     need_refresh = True
             if need_refresh:
                 universe = fetch_candidate_universe(
