@@ -652,7 +652,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--max-universe", type=int, default=80)
     p.add_argument("--scan-interval-sec", type=int, default=60)
     p.add_argument("--max-cycles", type=int, default=200)
-    p.add_argument("--bar-minutes", type=int, choices=[1, 3, 5], default=5)
+    p.add_argument("--bar-minutes", type=int, choices=[1, 3, 5], default=3)
     p.add_argument("--refresh-start-hhmm", type=int, default=700)
     p.add_argument("--refresh-end-hhmm", type=int, default=2000)
     p.add_argument("--refresh-interval-min", type=int, default=60)
