@@ -651,7 +651,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--cano", default=os.getenv("KIS_CANO", ""))
     p.add_argument("--acnt-prdt-cd", default=os.getenv("KIS_ACNT_PRDT_CD", "01"))
     p.add_argument("--dry-run", action="store_true", default=False)
-    p.add_argument("--max-universe", type=int, default=80)
+    p.add_argument("--max-universe", type=int, default=50)
     p.add_argument("--scan-interval-sec", type=int, default=60)
     p.add_argument("--max-cycles", type=int, default=200)
     p.add_argument("--bar-minutes", type=int, choices=[1, 3, 5], default=3)
