@@ -662,6 +662,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--initial-cash", type=float, default=10_000_000, help="account seed cash for position sizing")
     p.add_argument("--position-size-pct", type=float, default=0.20, help="max position size per symbol (0~1)")
     p.add_argument("--fallback-position-size-pct", type=float, default=0.10, help="position size for nearest fallback symbol (0~1)")
+    p.add_argument("--max-buys-per-scan", type=int, default=2, help="max buy orders per scan cycle")
+    p.add_argument("--max-positions", type=int, default=5, help="max concurrent holding symbols")
     p.add_argument("--order-krw", type=float, default=0.0, help="optional fixed order amount; 0 uses initial-cash * position-size-pct")
     p.add_argument("--ma-converge-pct", type=float, default=0.025)
     p.add_argument("--ma60-no-break-days", type=int, default=5, help="minute bars count for no-break check")
@@ -683,9 +685,9 @@ def in_refresh_window(now: datetime, start_hhmm: int, end_hhmm: int) -> bool:
     return now.weekday() < 5 and int(start_hhmm) <= hhmm <= int(end_hhmm)
 
 
-def buy_signal_from_minute_bars(rows: List[Dict[str, float]], adx_min: float) -> Tuple[bool, str]:
+def buy_signal_from_minute_bars(rows: List[Dict[str, float]], adx_min: float) -> Tuple[bool, str, float]:
     if len(rows) < 70:
-        return False, "warmup"
+        return False, "warmup", -1.0
     high = np.asarray([r["high"] for r in rows], dtype=float)
     low = np.asarray([r["low"] for r in rows], dtype=float)
     close = np.asarray([r["close"] for r in rows], dtype=float)
@@ -707,7 +709,13 @@ def buy_signal_from_minute_bars(rows: List[Dict[str, float]], adx_min: float) ->
 
     ok = stoch_cross and dmi_cross and adx_ok and rsi_boll_ok
     reason = f"stoch={stoch_cross} dmi={dmi_cross} adx={adx_ok} rsi_boll={rsi_boll_ok}"
-    return ok, reason
+    if not ok:
+        return ok, reason, -1.0
+    adx_v = float(adx[-1]) if np.isfinite(adx[-1]) else 0.0
+    dmi_gap = float(plus_di[-1] - minus_di[-1]) if np.isfinite(plus_di[-1]) and np.isfinite(minus_di[-1]) else 0.0
+    stoch_gap = float(st_k[-1] - st_d[-1]) if np.isfinite(st_k[-1]) and np.isfinite(st_d[-1]) else 0.0
+    score = adx_v + (0.5 * dmi_gap) + (0.2 * stoch_gap)
+    return ok, reason, score
 
 
 def sell_signal_from_minute_bars(rows: List[Dict[str, float]]) -> Tuple[bool, str]:
@@ -862,6 +870,7 @@ def main() -> None:
             if cycle + 1 < args.max_cycles:
                 time.sleep(max(1, int(args.scan_interval_sec)))
             continue
+        buy_candidates: List[Tuple[float, Candidate, float]] = []
         for c in filtered:
             raw_rows = fetch_minute_ohlcv(
                 base_url=args.base_url,
@@ -877,42 +886,10 @@ def main() -> None:
             close = rows[-1]["close"]
             has_pos = positions.get(c.symbol, 0) > 0
             if not has_pos:
-                buy_ok, buy_reason = buy_signal_from_minute_bars(rows, adx_min=float(args.adx_min))
+                buy_ok, buy_reason, buy_score = buy_signal_from_minute_bars(rows, adx_min=float(args.adx_min))
                 if not buy_ok:
                     continue
-                if float(args.order_krw) > 0:
-                    budget = float(args.order_krw)
-                else:
-                    pos_pct = float(args.position_size_pct)
-                    if c.symbol in fallback_symbols:
-                        pos_pct = float(args.fallback_position_size_pct)
-                    budget = max(0.0, float(args.initial_cash) * min(1.0, max(0.0, pos_pct)))
-                qty = int(max(0.0, budget) // max(1.0, close))
-                if qty <= 0:
-                    notifier.send(f"매수스킵 {c.symbol} 수량0")
-                    continue
-                if args.dry_run:
-                    notifier.send(f"매수 {c.symbol} {c.name} {qty}주 {close:.0f}원 (DRY)")
-                    positions[c.symbol] = qty
-                else:
-                    res = place_order(
-                        base_url=args.base_url,
-                        token=token,
-                        app_key=args.app_key,
-                        app_secret=args.app_secret,
-                        cano=args.cano,
-                        acnt_prdt_cd=args.acnt_prdt_cd,
-                        symbol=c.symbol,
-                        qty=qty,
-                        side="buy",
-                    )
-                    ok = str(res.get("rt_cd", "")) == "0"
-                    if ok:
-                        notifier.send(f"매수완료 {c.symbol} {c.name} {qty}주 {close:.0f}원")
-                    else:
-                        notifier.send(f"매수실패 {c.symbol} {c.name} {qty}주 {close:.0f}원")
-                    if ok:
-                        positions[c.symbol] = qty
+                buy_candidates.append((buy_score, c, float(close)))
             else:
                 sell_ok, sell_reason = sell_signal_from_minute_bars(rows)
                 if not sell_ok:
@@ -942,6 +919,46 @@ def main() -> None:
                         notifier.send(f"매도실패 {c.symbol} {c.name} {qty}주 {close:.0f}원")
                     if ok:
                         positions[c.symbol] = 0
+        if buy_candidates:
+            holding_count = sum(1 for q in positions.values() if q > 0)
+            slots_left = max(0, int(args.max_positions) - holding_count)
+            buys_left = min(max(0, int(args.max_buys_per_scan)), slots_left)
+            if buys_left > 0:
+                ranked = sorted(buy_candidates, key=lambda x: x[0], reverse=True)
+                for score, c, close in ranked[:buys_left]:
+                    if float(args.order_krw) > 0:
+                        budget = float(args.order_krw)
+                    else:
+                        pos_pct = float(args.position_size_pct)
+                        if c.symbol in fallback_symbols:
+                            pos_pct = float(args.fallback_position_size_pct)
+                        budget = max(0.0, float(args.initial_cash) * min(1.0, max(0.0, pos_pct)))
+                    qty = int(max(0.0, budget) // max(1.0, close))
+                    if qty <= 0:
+                        notifier.send(f"매수스킵 {c.symbol} 수량0")
+                        continue
+                    if args.dry_run:
+                        notifier.send(f"매수 {c.symbol} {c.name} {qty}주 {close:.0f}원 (DRY)")
+                        positions[c.symbol] = qty
+                    else:
+                        res = place_order(
+                            base_url=args.base_url,
+                            token=token,
+                            app_key=args.app_key,
+                            app_secret=args.app_secret,
+                            cano=args.cano,
+                            acnt_prdt_cd=args.acnt_prdt_cd,
+                            symbol=c.symbol,
+                            qty=qty,
+                            side="buy",
+                        )
+                        ok = str(res.get("rt_cd", "")) == "0"
+                        if ok:
+                            notifier.send(f"매수완료 {c.symbol} {c.name} {qty}주 {close:.0f}원")
+                        else:
+                            notifier.send(f"매수실패 {c.symbol} {c.name} {qty}주 {close:.0f}원")
+                        if ok:
+                            positions[c.symbol] = qty
         if cycle + 1 < args.max_cycles:
             time.sleep(max(1, int(args.scan_interval_sec)))
 
