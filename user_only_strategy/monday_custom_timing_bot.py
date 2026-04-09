@@ -280,7 +280,7 @@ def fetch_candidate_universe(
 def format_candidate_preview(universe: List[Tuple[str, str]], limit: int = 20) -> str:
     out: List[str] = []
     for symbol, name in universe[: max(1, int(limit))]:
-        out.append(f"{symbol}({name})" if name else symbol)
+        out.append(name if name else symbol)
     return ", ".join(out)
 
 
@@ -517,8 +517,10 @@ def minute_filter(
     ma60_no_break_days: int,
     ma20_support_days: int,
     bar_minutes: int,
-) -> List[Candidate]:
+) -> Tuple[List[Candidate], Candidate | None]:
     selected: List[Candidate] = []
+    nearest: Candidate | None = None
+    nearest_score = float("inf")
     for symbol, name in universe:
         rows = fetch_minute_ohlcv(
             base_url=base_url,
@@ -543,45 +545,51 @@ def minute_filter(
 
         ma_values = [ma3[-1], ma5[-1], ma10[-1]]
         convergence = (max(ma_values) - min(ma_values)) / max(1e-12, close[-1])
-        if convergence > ma_converge_pct:
-            continue
-
-        if close[-1] < ma60[-1]:
-            continue
+        converge_gap = max(0.0, convergence - float(ma_converge_pct))
+        ma60_gap = max(0.0, (ma60[-1] - close[-1]) / max(1e-12, close[-1]))
+        pass_converge = convergence <= ma_converge_pct
+        pass_ma60 = close[-1] >= ma60[-1]
 
         keep_60 = True
+        break_60_cnt = 0
         for i in range(1, max(1, ma60_no_break_days) + 1):
             if i >= close.shape[0]:
                 break
             if not np.isfinite(ma60[-i]) or low[-i] < ma60[-i]:
                 keep_60 = False
-                break
-        if not keep_60:
-            continue
+                break_60_cnt += 1
 
         keep_20 = True
+        break_20_cnt = 0
         for i in range(1, max(1, ma20_support_days) + 1):
             if i >= close.shape[0]:
                 break
             if not np.isfinite(ma20[-i]) or close[-i] < ma20[-i]:
                 keep_20 = False
-                break
-        if not keep_20:
+                break_20_cnt += 1
+
+        candidate = Candidate(
+            symbol=symbol,
+            name=name,
+            close=float(close[-1]),
+            ma3=float(ma3[-1]),
+            ma5=float(ma5[-1]),
+            ma10=float(ma10[-1]),
+            ma20=float(ma20[-1]),
+            ma60=float(ma60[-1]),
+        )
+
+        # Lower score means "closer" to passing all daily/minute filters.
+        near_score = (converge_gap * 1000.0) + (ma60_gap * 1000.0) + (float(break_60_cnt) * 10.0) + (float(break_20_cnt) * 5.0)
+        if near_score < nearest_score:
+            nearest = candidate
+            nearest_score = near_score
+
+        if not (pass_converge and pass_ma60 and keep_60 and keep_20):
             continue
 
-        selected.append(
-            Candidate(
-                symbol=symbol,
-                name=name,
-                close=float(close[-1]),
-                ma3=float(ma3[-1]),
-                ma5=float(ma5[-1]),
-                ma10=float(ma10[-1]),
-                ma20=float(ma20[-1]),
-                ma60=float(ma60[-1]),
-            )
-        )
-    return selected
+        selected.append(candidate)
+    return selected, nearest
 
 
 class Notifier:
@@ -623,6 +631,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--empty-refresh-interval-min", type=int, default=10, help="refresh interval when no symbol passed filters")
     p.add_argument("--initial-cash", type=float, default=10_000_000, help="account seed cash for position sizing")
     p.add_argument("--position-size-pct", type=float, default=0.20, help="max position size per symbol (0~1)")
+    p.add_argument("--fallback-position-size-pct", type=float, default=0.10, help="position size for nearest fallback symbol (0~1)")
     p.add_argument("--order-krw", type=float, default=0.0, help="optional fixed order amount; 0 uses initial-cash * position-size-pct")
     p.add_argument("--ma-converge-pct", type=float, default=0.025)
     p.add_argument("--ma60-no-break-days", type=int, default=5, help="minute bars count for no-break check")
@@ -705,6 +714,7 @@ def main() -> None:
     notifier = Notifier(Path(args.log_file), args.telegram_bot_token, args.telegram_chat_id)
     token = get_access_token(args.app_key, args.app_secret, base_url=args.base_url)
     filtered: List[Candidate] = []
+    fallback_symbols: set[str] = set()
     last_refresh: datetime | None = None
     positions: Dict[str, int] = {}
 
@@ -722,7 +732,7 @@ def main() -> None:
         notifier.send(f"후보 {len(universe)}개")
         if universe:
             notifier.send(f"후보리스트 {min(len(universe), 20)}개 | {format_candidate_preview(universe, 20)}")
-        filtered = minute_filter(
+        filtered, nearest = minute_filter(
             base_url=args.base_url,
             token=token,
             app_key=args.app_key,
@@ -733,8 +743,13 @@ def main() -> None:
             ma20_support_days=args.ma20_support_days,
             bar_minutes=args.bar_minutes,
         )
+        fallback_symbols = set()
         if not filtered:
             notifier.send("조건통과 종목 없음")
+            if nearest is not None:
+                filtered = [nearest]
+                fallback_symbols = {nearest.symbol}
+                notifier.send(f"근접 1종목 | {nearest.name if nearest.name else nearest.symbol}")
         else:
             preview = ", ".join([f"{c.symbol}({c.name})" for c in filtered[:8]])
             notifier.send(f"선정 {len(filtered)}개 | {preview}")
@@ -760,7 +775,7 @@ def main() -> None:
                 notifier.send(f"후보 {len(universe)}개")
                 if universe:
                     notifier.send(f"후보리스트 {min(len(universe), 20)}개 | {format_candidate_preview(universe, 20)}")
-                filtered = minute_filter(
+                filtered, nearest = minute_filter(
                     base_url=args.base_url,
                     token=token,
                     app_key=args.app_key,
@@ -771,8 +786,13 @@ def main() -> None:
                     ma20_support_days=args.ma20_support_days,
                     bar_minutes=args.bar_minutes,
                 )
+                fallback_symbols = set()
                 if not filtered:
                     notifier.send("조건통과 종목 없음")
+                    if nearest is not None:
+                        filtered = [nearest]
+                        fallback_symbols = {nearest.symbol}
+                        notifier.send(f"근접 1종목 | {nearest.name if nearest.name else nearest.symbol}")
                 else:
                     preview = ", ".join([f"{c.symbol}({c.name})" for c in filtered[:8]])
                     notifier.send(f"선정 {len(filtered)}개 | {preview}")
@@ -803,7 +823,10 @@ def main() -> None:
                 if float(args.order_krw) > 0:
                     budget = float(args.order_krw)
                 else:
-                    budget = max(0.0, float(args.initial_cash) * min(1.0, max(0.0, float(args.position_size_pct))))
+                    pos_pct = float(args.position_size_pct)
+                    if c.symbol in fallback_symbols:
+                        pos_pct = float(args.fallback_position_size_pct)
+                    budget = max(0.0, float(args.initial_cash) * min(1.0, max(0.0, pos_pct)))
                 qty = int(max(0.0, budget) // max(1.0, close))
                 if qty <= 0:
                     notifier.send(f"매수스킵 {c.symbol} 수량0")
