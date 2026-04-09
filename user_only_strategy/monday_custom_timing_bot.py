@@ -277,7 +277,7 @@ def fetch_candidate_universe(
     return [(sym, names.get(sym, "")) for sym, _ in ranked]
 
 
-def format_candidate_preview(universe: List[Tuple[str, str]], limit: int = 20) -> str:
+def format_candidate_preview(universe: List[Tuple[str, str]], limit: int = 9999) -> str:
     out: List[str] = []
     for symbol, name in universe[: max(1, int(limit))]:
         out.append(name if name else symbol)
@@ -732,7 +732,7 @@ def main() -> None:
         )
         notifier.send(f"후보 {len(universe)}개")
         if universe:
-            notifier.send(f"후보리스트 {min(len(universe), 20)}개 | {format_candidate_preview(universe, 20)}")
+            notifier.send(f"후보리스트 {len(universe)}개 | {format_candidate_preview(universe, len(universe))}")
         filtered, nearest = minute_filter(
             base_url=args.base_url,
             token=token,
@@ -776,7 +776,7 @@ def main() -> None:
                 )
                 notifier.send(f"후보 {len(universe)}개")
                 if universe:
-                    notifier.send(f"후보리스트 {min(len(universe), 20)}개 | {format_candidate_preview(universe, 20)}")
+                    notifier.send(f"후보리스트 {len(universe)}개 | {format_candidate_preview(universe, len(universe))}")
                 filtered, nearest = minute_filter(
                     base_url=args.base_url,
                     token=token,
