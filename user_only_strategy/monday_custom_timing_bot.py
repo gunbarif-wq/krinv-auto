@@ -752,12 +752,16 @@ def main() -> None:
     strict_filtered_count = 0
     fallback_symbols: set[str] = set()
     last_refresh: datetime | None = None
+    active_session_day = None
+    close_notified_day = None
+    end_hhmm = int(args.refresh_end_hhmm)
     positions: Dict[str, int] = {}
 
     # If the bot is restarted during the refresh window, refresh immediately
     # so users get candidate/selection telegram messages right away.
     now0 = datetime.now(KST)
     if in_refresh_window(now0, args.refresh_start_hhmm, args.refresh_end_hhmm):
+        active_session_day = now0.date()
         notifier.send("종목선정 시작")
         universe = fetch_candidate_universe(
             base_url=args.base_url,
@@ -797,7 +801,9 @@ def main() -> None:
 
     for cycle in range(max(1, args.max_cycles)):
         now = datetime.now(KST)
+        hhmm = now.hour * 100 + now.minute
         if in_refresh_window(now, args.refresh_start_hhmm, args.refresh_end_hhmm):
+            active_session_day = now.date()
             need_refresh = last_refresh is None
             if last_refresh is not None:
                 elapsed = (now - last_refresh).total_seconds() / 60.0
@@ -841,6 +847,16 @@ def main() -> None:
                     preview = ", ".join([f"{c.symbol}({c.name})" for c in filtered[:8]])
                     notifier.send(f"선정 {len(filtered)}개 | {preview}")
                 last_refresh = now
+
+        if (
+            now.weekday() < 5
+            and active_session_day == now.date()
+            and close_notified_day != now.date()
+            and hhmm >= end_hhmm
+            and not in_refresh_window(now, args.refresh_start_hhmm, args.refresh_end_hhmm)
+        ):
+            notifier.send("20시 종료: 오늘 운용 종료")
+            close_notified_day = now.date()
 
         if not in_korean_regular_session(now) or not filtered:
             if cycle + 1 < args.max_cycles:
