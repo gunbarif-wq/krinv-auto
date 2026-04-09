@@ -714,6 +714,7 @@ def main() -> None:
     notifier = Notifier(Path(args.log_file), args.telegram_bot_token, args.telegram_chat_id)
     token = get_access_token(args.app_key, args.app_secret, base_url=args.base_url)
     filtered: List[Candidate] = []
+    strict_filtered_count = 0
     fallback_symbols: set[str] = set()
     last_refresh: datetime | None = None
     positions: Dict[str, int] = {}
@@ -743,6 +744,7 @@ def main() -> None:
             ma20_support_days=args.ma20_support_days,
             bar_minutes=args.bar_minutes,
         )
+        strict_filtered_count = len(filtered)
         fallback_symbols = set()
         if not filtered:
             notifier.send("조건통과 종목 없음")
@@ -761,7 +763,7 @@ def main() -> None:
             need_refresh = last_refresh is None
             if last_refresh is not None:
                 elapsed = (now - last_refresh).total_seconds() / 60.0
-                refresh_interval_min = int(args.refresh_interval_min) if filtered else int(args.empty_refresh_interval_min)
+                refresh_interval_min = int(args.refresh_interval_min) if strict_filtered_count > 0 else int(args.empty_refresh_interval_min)
                 if elapsed >= max(1, refresh_interval_min):
                     need_refresh = True
             if need_refresh:
@@ -786,6 +788,7 @@ def main() -> None:
                     ma20_support_days=args.ma20_support_days,
                     bar_minutes=args.bar_minutes,
                 )
+                strict_filtered_count = len(filtered)
                 fallback_symbols = set()
                 if not filtered:
                     notifier.send("조건통과 종목 없음")
