@@ -653,7 +653,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--scan-interval-sec", type=int, default=60)
     p.add_argument("--max-cycles", type=int, default=200)
     p.add_argument("--bar-minutes", type=int, choices=[1, 3, 5], default=3)
-    p.add_argument("--refresh-start-hhmm", type=int, default=700)
+    p.add_argument("--refresh-start-hhmm", type=int, default=800)
     p.add_argument("--refresh-end-hhmm", type=int, default=2000)
     p.add_argument("--refresh-interval-min", type=int, default=60)
     p.add_argument("--empty-refresh-interval-min", type=int, default=10, help="refresh interval when no symbol passed filters")
@@ -673,7 +673,7 @@ def parse_args() -> argparse.Namespace:
 
 def in_korean_regular_session(now: datetime) -> bool:
     hhmm = now.hour * 100 + now.minute
-    return now.weekday() < 5 and 700 <= hhmm <= 2000
+    return now.weekday() < 5 and 800 <= hhmm <= 2000
 
 
 def in_refresh_window(now: datetime, start_hhmm: int, end_hhmm: int) -> bool:
@@ -751,6 +751,7 @@ def main() -> None:
     # so users get candidate/selection telegram messages right away.
     now0 = datetime.now(KST)
     if in_refresh_window(now0, args.refresh_start_hhmm, args.refresh_end_hhmm):
+        notifier.send("종목선정 시작")
         universe = fetch_candidate_universe(
             base_url=args.base_url,
             token=token,
@@ -797,6 +798,7 @@ def main() -> None:
                 if elapsed >= max(1, refresh_interval_min):
                     need_refresh = True
             if need_refresh:
+                notifier.send("종목선정 시작")
                 universe = fetch_candidate_universe(
                     base_url=args.base_url,
                     token=token,
