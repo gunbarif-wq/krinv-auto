@@ -284,6 +284,22 @@ def format_candidate_preview(universe: List[Tuple[str, str]], limit: int = 9999)
     return ", ".join(out)
 
 
+def fallback_candidate_from_universe(universe: List[Tuple[str, str]]) -> Candidate | None:
+    if not universe:
+        return None
+    symbol, name = universe[0]
+    return Candidate(
+        symbol=symbol,
+        name=name,
+        close=0.0,
+        ma3=0.0,
+        ma5=0.0,
+        ma10=0.0,
+        ma20=0.0,
+        ma60=0.0,
+    )
+
+
 def fetch_minute_ohlcv(
     base_url: str,
     token: str,
@@ -748,6 +764,8 @@ def main() -> None:
         fallback_symbols = set()
         if not filtered:
             notifier.send("조건통과 종목 없음")
+            if nearest is None:
+                nearest = fallback_candidate_from_universe(universe)
             if nearest is not None:
                 filtered = [nearest]
                 fallback_symbols = {nearest.symbol}
@@ -792,6 +810,8 @@ def main() -> None:
                 fallback_symbols = set()
                 if not filtered:
                     notifier.send("조건통과 종목 없음")
+                    if nearest is None:
+                        nearest = fallback_candidate_from_universe(universe)
                     if nearest is not None:
                         filtered = [nearest]
                         fallback_symbols = {nearest.symbol}
