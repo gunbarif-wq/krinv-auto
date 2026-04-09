@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import argparse
 import html
@@ -275,6 +275,13 @@ def fetch_candidate_universe(
 
     ranked = sorted(score.items(), key=lambda x: x[1], reverse=True)[: max(1, max_universe)]
     return [(sym, names.get(sym, "")) for sym, _ in ranked]
+
+
+def format_candidate_preview(universe: List[Tuple[str, str]], limit: int = 20) -> str:
+    out: List[str] = []
+    for symbol, name in universe[: max(1, int(limit))]:
+        out.append(f"{symbol}({name})" if name else symbol)
+    return ", ".join(out)
 
 
 def fetch_minute_ohlcv(
@@ -617,7 +624,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--initial-cash", type=float, default=10_000_000, help="account seed cash for position sizing")
     p.add_argument("--position-size-pct", type=float, default=0.20, help="max position size per symbol (0~1)")
     p.add_argument("--order-krw", type=float, default=0.0, help="optional fixed order amount; 0 uses initial-cash * position-size-pct")
-    p.add_argument("--ma-converge-pct", type=float, default=0.015)
+    p.add_argument("--ma-converge-pct", type=float, default=0.025)
     p.add_argument("--ma60-no-break-days", type=int, default=5, help="minute bars count for no-break check")
     p.add_argument("--ma20-support-days", type=int, default=3, help="minute bars count for MA20 support check")
     p.add_argument("--adx-min", type=float, default=20.0)
@@ -713,6 +720,8 @@ def main() -> None:
             max_universe=args.max_universe,
         )
         notifier.send(f"후보 {len(universe)}개")
+        if universe:
+            notifier.send(f"후보리스트 {min(len(universe), 20)}개 | {format_candidate_preview(universe, 20)}")
         filtered = minute_filter(
             base_url=args.base_url,
             token=token,
@@ -749,6 +758,8 @@ def main() -> None:
                     max_universe=args.max_universe,
                 )
                 notifier.send(f"후보 {len(universe)}개")
+                if universe:
+                    notifier.send(f"후보리스트 {min(len(universe), 20)}개 | {format_candidate_preview(universe, 20)}")
                 filtered = minute_filter(
                     base_url=args.base_url,
                     token=token,
@@ -854,3 +865,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
