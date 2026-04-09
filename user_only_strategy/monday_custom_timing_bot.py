@@ -621,15 +621,17 @@ def minute_filter(
 
 
 class Notifier:
-    def __init__(self, log_path: Path, telegram_token: str, telegram_chat_id: str):
+    def __init__(self, log_path: Path, telegram_token: str, telegram_chat_id: str, message_prefix: str = ""):
         self.log_path = log_path
         self.log_path.parent.mkdir(parents=True, exist_ok=True)
         self.telegram_token = telegram_token.strip()
         self.telegram_chat_id = telegram_chat_id.strip()
+        self.message_prefix = message_prefix.strip()
 
     def send(self, text: str) -> None:
         ts = datetime.now(KST).strftime("%Y-%m-%d %H:%M:%S")
-        line = f"[{ts}] {text}"
+        body = f"[{self.message_prefix}] {text}" if self.message_prefix else text
+        line = f"[{ts}] {body}"
         print(line)
         with self.log_path.open("a", encoding="utf-8") as f:
             f.write(line + "\n")
@@ -739,7 +741,12 @@ def main() -> None:
     if not args.dry_run and (not args.cano or not args.acnt_prdt_cd):
         raise RuntimeError("KIS_CANO and KIS_ACNT_PRDT_CD required for live order")
 
-    notifier = Notifier(Path(args.log_file), args.telegram_bot_token, args.telegram_chat_id)
+    notifier = Notifier(
+        Path(args.log_file),
+        args.telegram_bot_token,
+        args.telegram_chat_id,
+        message_prefix=f"{int(args.bar_minutes)}분봉",
+    )
     token = get_access_token(args.app_key, args.app_secret, base_url=args.base_url)
     filtered: List[Candidate] = []
     strict_filtered_count = 0
