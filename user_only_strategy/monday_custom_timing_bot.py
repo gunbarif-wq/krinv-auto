@@ -659,6 +659,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--refresh-end-hhmm", type=int, default=2000)
     p.add_argument("--refresh-interval-min", type=int, default=60)
     p.add_argument("--empty-refresh-interval-min", type=int, default=10, help="refresh interval when no symbol passed filters")
+    p.add_argument("--watch-report-interval-min", type=int, default=10, help="tracking report interval while watching selected symbols")
     p.add_argument("--initial-cash", type=float, default=10_000_000, help="account seed cash for position sizing")
     p.add_argument("--position-size-pct", type=float, default=0.20, help="max position size per symbol (0~1)")
     p.add_argument("--fallback-position-size-pct", type=float, default=0.10, help="position size for nearest fallback symbol (0~1)")
@@ -673,6 +674,15 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--telegram-bot-token", default=os.getenv("TELEGRAM_BOT_TOKEN", ""))
     p.add_argument("--telegram-chat-id", default=os.getenv("TELEGRAM_CHAT_ID", ""))
     return p.parse_args()
+
+
+def watch_preview(candidates: List["Candidate"], max_items: int = 12) -> str:
+    if not candidates:
+        return "-"
+    names = []
+    for c in candidates[:max_items]:
+        names.append(c.name if c.name else c.symbol)
+    return ", ".join(names)
 
 
 def in_korean_regular_session(now: datetime) -> bool:
@@ -756,10 +766,11 @@ def main() -> None:
         message_prefix=f"{int(args.bar_minutes)}분봉",
     )
     token = get_access_token(args.app_key, args.app_secret, base_url=args.base_url)
-    filtered: List[Candidate] = []
+    watch_candidates: List[Candidate] = []
     strict_filtered_count = 0
     fallback_symbols: set[str] = set()
     last_refresh: datetime | None = None
+    last_watch_report: datetime | None = None
     active_session_day = None
     close_notified_day = None
     end_hhmm = int(args.refresh_end_hhmm)
@@ -794,18 +805,23 @@ def main() -> None:
         )
         strict_filtered_count = len(filtered)
         fallback_symbols = set()
+        watch_candidates = []
         if not filtered:
             notifier.send("조건통과 종목 없음")
             if nearest is None:
                 nearest = fallback_candidate_from_universe(universe)
             if nearest is not None:
-                filtered = [nearest]
+                watch_candidates = [nearest]
                 fallback_symbols = {nearest.symbol}
                 notifier.send(f"근접 1종목 | {nearest.name if nearest.name else nearest.symbol}")
         else:
+            watch_candidates = filtered
             preview = ", ".join([f"{c.symbol}({c.name})" for c in filtered[:8]])
             notifier.send(f"선정 {len(filtered)}개 | {preview}")
+        if watch_candidates:
+            notifier.send(f"추적 {len(watch_candidates)}개 | {watch_preview(watch_candidates)}")
         last_refresh = now0
+        last_watch_report = now0
 
     for cycle in range(max(1, args.max_cycles)):
         now = datetime.now(KST)
@@ -843,17 +859,21 @@ def main() -> None:
                 )
                 strict_filtered_count = len(filtered)
                 fallback_symbols = set()
+                watch_candidates = []
                 if not filtered:
                     notifier.send("조건통과 종목 없음")
                     if nearest is None:
                         nearest = fallback_candidate_from_universe(universe)
                     if nearest is not None:
-                        filtered = [nearest]
+                        watch_candidates = [nearest]
                         fallback_symbols = {nearest.symbol}
                         notifier.send(f"근접 1종목 | {nearest.name if nearest.name else nearest.symbol}")
                 else:
+                    watch_candidates = filtered
                     preview = ", ".join([f"{c.symbol}({c.name})" for c in filtered[:8]])
                     notifier.send(f"선정 {len(filtered)}개 | {preview}")
+                if watch_candidates:
+                    notifier.send(f"추적 {len(watch_candidates)}개 | {watch_preview(watch_candidates)}")
                 last_refresh = now
 
         if (
@@ -866,12 +886,23 @@ def main() -> None:
             notifier.send("20시 종료: 오늘 운용 종료")
             close_notified_day = now.date()
 
-        if not in_korean_regular_session(now) or not filtered:
+        if (
+            in_korean_regular_session(now)
+            and watch_candidates
+            and (
+                last_watch_report is None
+                or (now - last_watch_report).total_seconds() >= max(60, int(args.watch_report_interval_min) * 60)
+            )
+        ):
+            notifier.send(f"추적관찰 중 {len(watch_candidates)}개 | {watch_preview(watch_candidates)}")
+            last_watch_report = now
+
+        if not in_korean_regular_session(now) or not watch_candidates:
             if cycle + 1 < args.max_cycles:
                 time.sleep(max(1, int(args.scan_interval_sec)))
             continue
         buy_candidates: List[Tuple[float, Candidate, float]] = []
-        for c in filtered:
+        for c in watch_candidates:
             raw_rows = fetch_minute_ohlcv(
                 base_url=args.base_url,
                 token=token,
@@ -881,7 +912,7 @@ def main() -> None:
                 count_hint=raw_count_hint_for_resampled_bars(80, args.bar_minutes),
             )
             rows = resample_bars(raw_rows, bar_minutes=args.bar_minutes)
-            if len(rows) < 70:
+            if not rows:
                 continue
             close = rows[-1]["close"]
             has_pos = positions.get(c.symbol, 0) > 0
