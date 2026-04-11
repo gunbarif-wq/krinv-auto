@@ -454,6 +454,41 @@ def read_symbols_file(path_text: str) -> List[str]:
     return rows
 
 
+def enrich_name_map_from_krx(known_name_map: Dict[str, str]) -> int:
+    """
+    Best-effort KRX ticker-name load.
+    Requires optional dependency: pykrx
+    """
+    try:
+        from pykrx import stock  # type: ignore
+    except Exception:
+        return 0
+    loaded = 0
+    try:
+        markets = ["KOSPI", "KOSDAQ", "KONEX"]
+        for market in markets:
+            try:
+                tickers = stock.get_market_ticker_list(market=market)
+            except Exception:
+                continue
+            for ticker in tickers:
+                symbol = str(ticker).zfill(6)
+                if not (symbol.isdigit() and len(symbol) == 6):
+                    continue
+                if symbol in known_name_map and known_name_map[symbol]:
+                    continue
+                try:
+                    name = str(stock.get_market_ticker_name(symbol) or "").strip()
+                except Exception:
+                    name = ""
+                if name:
+                    known_name_map[symbol] = name
+                    loaded += 1
+    except Exception:
+        return loaded
+    return loaded
+
+
 def fallback_candidate_from_universe(universe: List[Tuple[str, str]]) -> Candidate | None:
     if not universe:
         return None
@@ -1110,7 +1145,8 @@ def parse_telegram_watch_command(text: str, known_name_map: Dict[str, str]) -> T
     raw = str(text or "").strip()
     if not raw:
         return "ignore", []
-    if raw in {"모니터", "monitor", "MONITOR"}:
+    monitor_key = re.sub(r"\s+", "", raw)
+    if "모니터" in monitor_key:
         return "status", []
     payload = raw
 
@@ -1755,6 +1791,10 @@ def main() -> None:
     signal_first_seen_at: Dict[str, datetime] = {}
     net_err_streak = 0
     last_net_alert_at: datetime | None = None
+
+    loaded_krx_names = enrich_name_map_from_krx(known_name_map)
+    if loaded_krx_names > 0:
+        notifier.send(f"KRX종목명 로드 {loaded_krx_names}개")
 
     def notify_net_error(exc: Exception) -> int:
         nonlocal net_err_streak, last_net_alert_at
