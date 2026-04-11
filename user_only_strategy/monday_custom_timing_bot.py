@@ -1115,7 +1115,8 @@ def parse_telegram_watch_command(text: str, known_name_map: Dict[str, str]) -> T
     for part in parts:
         symbol, name = resolve_watch_symbol(part, known_name_map)
         if symbol:
-            resolved.append((symbol, name if name else symbol))
+            label = name if (name and not str(name).isdigit()) else part
+            resolved.append((symbol, label))
     if resolved:
         return "watch", resolved
     return "ignore", []
