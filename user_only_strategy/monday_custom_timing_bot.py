@@ -2067,22 +2067,14 @@ def main() -> None:
                 notifier.send(f"현재 모니터링종목 | {current_watch}")
                 continue
             if action == "unwatch":
-                removed_names: List[str] = []
-                kept_holdings: List[str] = []
                 for symbol, name in payload:
                     manual_watch_symbols.discard(symbol)
                     if positions.get(symbol, 0) > 0:
-                        kept_holdings.append(display_name(name, symbol))
                         continue
                     watch_candidates[:] = [c for c in watch_candidates if c.symbol != symbol]
                     signal_first_seen_at.pop(symbol, None)
-                    removed_names.append(display_name(name, symbol))
                 persist_runtime_state()
                 current_watch = monitoring_preview()
-                if removed_names:
-                    notifier.send(f"모니터링중단 | {', '.join(removed_names)}")
-                if kept_holdings:
-                    notifier.send(f"보유중유지 | {', '.join(kept_holdings)}")
                 notifier.send(f"현재 모니터링종목 | {current_watch}")
                 if not watch_candidates and not is_daily_trade_finished(now_local.date()):
                     last_refresh = None
