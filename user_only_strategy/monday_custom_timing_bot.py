@@ -24,6 +24,12 @@ if str(ROOT) not in sys.path:
     sys.path.append(str(ROOT))
 
 from fetch_kis_daily import fetch_daily_prices, get_access_token  # noqa: E402
+from user_only_strategy.krx_symbol_names import (  # noqa: E402
+    DEFAULT_SYMBOL_NAME_FILE,
+    load_symbol_name_map,
+    refresh_symbol_name_map_from_krx,
+    save_symbol_name_map,
+)
 
 
 KST = ZoneInfo("Asia/Seoul")
@@ -33,6 +39,7 @@ DEFAULT_TRADING_OPEN_HHMM = 800
 DEFAULT_TRADING_CLOSE_HHMM = 2000
 DEFAULT_SEARCH_START_HHMM = 700
 DEFAULT_MINUTE_MARKET_CODE = "UN"
+DEFAULT_WATCH_STATE_FILE = str(ROOT / "user_only_strategy" / "watch_state.json")
 SYMBOL_ALIAS_MAP = {
     "하이닉스": "000660",
     "sk하이닉스": "000660",
@@ -260,6 +267,59 @@ def wait_order_fill_status(
     return last_status
 
 
+def balance_inquiry_tr_id(base_url: str) -> str:
+    return "VTTC8434R" if is_demo_base_url(base_url) else "TTTC8434R"
+
+
+def fetch_account_holdings(
+    base_url: str,
+    token: str,
+    app_key: str,
+    app_secret: str,
+    cano: str,
+    acnt_prdt_cd: str,
+) -> Dict[str, Dict[str, float | int | str]]:
+    url = f"{base_url}/uapi/domestic-stock/v1/trading/inquire-balance"
+    headers = {
+        "authorization": f"Bearer {token}",
+        "appKey": app_key,
+        "appSecret": app_secret,
+        "tr_id": balance_inquiry_tr_id(base_url),
+        "custtype": "P",
+    }
+    params = {
+        "CANO": cano,
+        "ACNT_PRDT_CD": acnt_prdt_cd,
+        "AFHR_FLPR_YN": "N",
+        "OFL_YN": "",
+        "INQR_DVSN": "02",
+        "UNPR_DVSN": "01",
+        "FUND_STTL_ICLD_YN": "N",
+        "FNCG_AMT_AUTO_RDPT_YN": "N",
+        "PRCS_DVSN": "01",
+        "CTX_AREA_FK100": "",
+        "CTX_AREA_NK100": "",
+    }
+    data = request_json_with_retry("get", url, headers=headers, params=params, timeout=15, retries=2)
+    rows = data.get("output1", [])
+    if not isinstance(rows, list):
+        return {}
+    holdings: Dict[str, Dict[str, float | int | str]] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        symbol = str(row.get("pdno", "")).strip().zfill(6)
+        qty = _to_int(row.get("hldg_qty"))
+        if not (symbol.isdigit() and len(symbol) == 6 and qty > 0):
+            continue
+        holdings[symbol] = {
+            "name": str(row.get("prdt_name", "")).strip(),
+            "qty": qty,
+            "avg_price": _to_float(row.get("pchs_avg_pric")),
+        }
+    return holdings
+
+
 def fetch_ranking_rows(
     base_url: str,
     token: str,
@@ -454,39 +514,53 @@ def read_symbols_file(path_text: str) -> List[str]:
     return rows
 
 
-def enrich_name_map_from_krx(known_name_map: Dict[str, str]) -> int:
-    """
-    Best-effort KRX ticker-name load.
-    Requires optional dependency: pykrx
-    """
+def load_watch_state(path_text: str) -> Dict[str, object]:
+    path = Path(path_text).expanduser()
+    default: Dict[str, object] = {
+        "manual_watch_symbols": [],
+        "entry_price": {},
+        "peak_price": {},
+        "entry_time": {},
+        "limit_up_hold_day": {},
+    }
+    if not path.exists():
+        return default
     try:
-        from pykrx import stock  # type: ignore
+        payload = json.loads(path.read_text(encoding="utf-8"))
     except Exception:
-        return 0
-    loaded = 0
-    try:
-        markets = ["KOSPI", "KOSDAQ", "KONEX"]
-        for market in markets:
-            try:
-                tickers = stock.get_market_ticker_list(market=market)
-            except Exception:
-                continue
-            for ticker in tickers:
-                symbol = str(ticker).zfill(6)
-                if not (symbol.isdigit() and len(symbol) == 6):
-                    continue
-                if symbol in known_name_map and known_name_map[symbol]:
-                    continue
-                try:
-                    name = str(stock.get_market_ticker_name(symbol) or "").strip()
-                except Exception:
-                    name = ""
-                if name:
-                    known_name_map[symbol] = name
-                    loaded += 1
-    except Exception:
-        return loaded
-    return loaded
+        return default
+    if not isinstance(payload, dict):
+        return default
+    merged = dict(default)
+    for key, default_value in default.items():
+        value = payload.get(key)
+        if isinstance(default_value, list) and isinstance(value, list):
+            merged[key] = value
+        elif isinstance(default_value, dict) and isinstance(value, dict):
+            merged[key] = value
+    return merged
+
+
+def save_watch_state(
+    path_text: str,
+    *,
+    manual_watch_symbols: set[str],
+    entry_price: Dict[str, float],
+    peak_price: Dict[str, float],
+    entry_time: Dict[str, datetime],
+    limit_up_hold_day: Dict[str, datetime.date],
+) -> None:
+    path = Path(path_text).expanduser()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "updated_at": datetime.now(KST).strftime("%Y-%m-%d %H:%M:%S"),
+        "manual_watch_symbols": sorted({str(x).zfill(6) for x in manual_watch_symbols if str(x).isdigit()}),
+        "entry_price": {str(k).zfill(6): float(v) for k, v in entry_price.items() if str(k).isdigit()},
+        "peak_price": {str(k).zfill(6): float(v) for k, v in peak_price.items() if str(k).isdigit()},
+        "entry_time": {str(k).zfill(6): v.isoformat() for k, v in entry_time.items() if isinstance(v, datetime)},
+        "limit_up_hold_day": {str(k).zfill(6): v.isoformat() for k, v in limit_up_hold_day.items() if hasattr(v, "isoformat")},
+    }
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def fallback_candidate_from_universe(universe: List[Tuple[str, str]]) -> Candidate | None:
@@ -1503,6 +1577,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--telegram-command-poll-sec", type=int, default=15, help="telegram command polling interval")
     p.add_argument("--extra-symbols", default=os.getenv("NEXT_MARKET_SYMBOLS", ""), help="comma-separated extra symbols")
     p.add_argument("--extra-symbols-file", default=os.getenv("NEXT_MARKET_SYMBOLS_FILE", ""), help="extra symbols file path")
+    p.add_argument("--symbol-name-file", default=os.getenv("KRX_SYMBOL_NAME_FILE", DEFAULT_SYMBOL_NAME_FILE))
+    p.add_argument("--watch-state-file", default=os.getenv("WATCH_STATE_FILE", DEFAULT_WATCH_STATE_FILE))
     return p.parse_args()
 
 
@@ -1792,9 +1868,56 @@ def main() -> None:
     net_err_streak = 0
     last_net_alert_at: datetime | None = None
 
-    loaded_krx_names = enrich_name_map_from_krx(known_name_map)
-    if loaded_krx_names > 0:
-        notifier.send(f"KRX종목명 로드 {loaded_krx_names}개")
+    refreshed_symbol_names = refresh_symbol_name_map_from_krx(args.symbol_name_file)
+    loaded_symbol_names = load_symbol_name_map(args.symbol_name_file)
+    known_name_map.update(loaded_symbol_names)
+    if refreshed_symbol_names > 0:
+        notifier.send(f"종목명파일 갱신 {refreshed_symbol_names}개")
+    elif loaded_symbol_names:
+        notifier.send(f"종목명파일 로드 {len(loaded_symbol_names)}개")
+
+    def persist_symbol_name_map() -> None:
+        if known_name_map:
+            save_symbol_name_map(known_name_map, args.symbol_name_file)
+
+    saved_state = load_watch_state(args.watch_state_file)
+    manual_watch_symbols.update(
+        {
+            str(x).strip().zfill(6)
+            for x in saved_state.get("manual_watch_symbols", [])
+            if str(x).strip().isdigit() and 4 <= len(str(x).strip()) <= 6
+        }
+    )
+    for symbol, price in dict(saved_state.get("entry_price", {})).items():
+        if str(symbol).isdigit():
+            entry_price[str(symbol).zfill(6)] = _to_float(price)
+    for symbol, price in dict(saved_state.get("peak_price", {})).items():
+        if str(symbol).isdigit():
+            peak_price[str(symbol).zfill(6)] = _to_float(price)
+    for symbol, value in dict(saved_state.get("entry_time", {})).items():
+        if not str(symbol).isdigit():
+            continue
+        try:
+            entry_time[str(symbol).zfill(6)] = datetime.fromisoformat(str(value))
+        except Exception:
+            continue
+    for symbol, value in dict(saved_state.get("limit_up_hold_day", {})).items():
+        if not str(symbol).isdigit():
+            continue
+        try:
+            limit_up_hold_day[str(symbol).zfill(6)] = datetime.fromisoformat(f"{value}T00:00:00").date()
+        except Exception:
+            continue
+
+    def persist_runtime_state() -> None:
+        save_watch_state(
+            args.watch_state_file,
+            manual_watch_symbols=manual_watch_symbols,
+            entry_price=entry_price,
+            peak_price=peak_price,
+            entry_time=entry_time,
+            limit_up_hold_day=limit_up_hold_day,
+        )
 
     def notify_net_error(exc: Exception) -> int:
         nonlocal net_err_streak, last_net_alert_at
@@ -1833,6 +1956,7 @@ def main() -> None:
         entry_time[symbol] = datetime.now(KST)
         bought_symbols_today.add(symbol)
         signal_first_seen_at.pop(symbol, None)
+        persist_runtime_state()
 
     def clear_position_state(symbol: str) -> None:
         positions[symbol] = 0
@@ -1841,6 +1965,7 @@ def main() -> None:
         peak_price.pop(symbol, None)
         entry_time.pop(symbol, None)
         limit_up_hold_day.pop(symbol, None)
+        persist_runtime_state()
 
     def finish_if_all_closed(carryover_exit: bool = False) -> None:
         if sum(1 for q in positions.values() if q > 0) == 0 and (
@@ -1892,6 +2017,7 @@ def main() -> None:
         if manual_watch_symbols:
             manual_watch_symbols.intersection_update(keep_symbols)
         watch_candidates[:] = [c for c in watch_candidates if c.symbol in keep_symbols]
+        persist_runtime_state()
 
     def poll_telegram_commands(now_local: datetime) -> None:
         nonlocal telegram_update_offset, last_telegram_poll_at, last_refresh
@@ -1980,10 +2106,68 @@ def main() -> None:
                         except Exception as exc:
                             notifier.send(f"수동감시 즉시추가 실패 | {display_name(name, symbol)} | {type(exc).__name__}")
                 if added_names:
+                    persist_symbol_name_map()
+                    persist_runtime_state()
                     current_watch = monitoring_preview()
                     notifier.send(f"현재 모니터링종목 | {current_watch}")
                     if not watch_candidates and not is_daily_trade_finished(now_local.date()):
                         last_refresh = None
+
+    if not args.dry_run and args.cano and args.acnt_prdt_cd:
+        try:
+            restored_holdings = fetch_account_holdings(
+                base_url=args.base_url,
+                token=token,
+                app_key=args.app_key,
+                app_secret=args.app_secret,
+                cano=args.cano,
+                acnt_prdt_cd=args.acnt_prdt_cd,
+            )
+        except Exception as exc:
+            restored_holdings = {}
+            notifier.send(f"보유종목복원 실패 | {type(exc).__name__}")
+        if restored_holdings:
+            for symbol, row in restored_holdings.items():
+                qty = _to_int(row.get("qty"))
+                if qty <= 0:
+                    continue
+                positions[symbol] = qty
+                name = str(row.get("name", "")).strip()
+                if name:
+                    known_name_map[symbol] = name
+                avg_price = _to_float(row.get("avg_price"))
+                if avg_price > 0 and entry_price.get(symbol, 0.0) <= 0:
+                    entry_price[symbol] = avg_price
+                if avg_price > 0 and peak_price.get(symbol, 0.0) <= 0:
+                    peak_price[symbol] = avg_price
+                if symbol not in entry_time:
+                    entry_time[symbol] = datetime.now(KST)
+                if all(candidate.symbol != symbol for candidate in watch_candidates):
+                    restored = Candidate(
+                        symbol=symbol,
+                        name=known_name_map.get(symbol, name or symbol),
+                        close=avg_price,
+                        ma3=0.0,
+                        ma5=0.0,
+                        ma10=0.0,
+                        ma20=0.0,
+                        ma60=0.0,
+                    )
+                    restored.theme_id = 98
+                    restored.theme_name = "보유복원"
+                    watch_candidates.append(restored)
+            restored_names = [display_name(known_name_map.get(symbol, ""), symbol) for symbol in sorted(restored_holdings)]
+            notifier.send(f"보유종목 복원 | {', '.join(restored_names)}")
+            persist_symbol_name_map()
+            persist_runtime_state()
+
+    if manual_watch_symbols:
+        restored_manual = rebuild_manual_watch_candidates()
+        for candidate in restored_manual:
+            if all(existing.symbol != candidate.symbol for existing in watch_candidates):
+                watch_candidates.append(candidate)
+        notifier.send(f"수동감시 복원 | {monitoring_preview()}")
+        persist_runtime_state()
 
     boot_now = datetime.now(KST)
     boot_hhmm = boot_now.hour * 100 + boot_now.minute
@@ -2059,6 +2243,8 @@ def main() -> None:
                 for symbol, name in universe:
                     if name:
                         known_name_map[symbol] = name
+                if universe:
+                    persist_symbol_name_map()
                 if universe:
                     send_candidate_list_messages(notifier, universe, chunk_size=25)
                 prev_stats_map: Dict[str, PreviousDayStats] = {}
@@ -2225,6 +2411,7 @@ def main() -> None:
                     if limit_up_hold_day.get(c.symbol) != now.date():
                         limit_up_hold_day[c.symbol] = now.date()
                         notifier.send(f"상한가보유전환 | {display_name(c.name, c.symbol)} | 기준 {limit_up_price:.0f}원")
+                        persist_runtime_state()
                 hold_due_limit_today = limit_up_hold_day.get(c.symbol) == now.date()
                 if hold_due_limit_today:
                     continue
@@ -2309,6 +2496,7 @@ def main() -> None:
                             notifier.send(f"매도부분체결 {display_name(c.name, c.symbol)} {filled_qty}/{max(ord_qty, qty)}주 | 주문번호:{odno}")
                             remain = max(0, qty - max(0, filled_qty))
                             positions[c.symbol] = remain
+                            persist_runtime_state()
                             if remain <= 0:
                                 clear_position_state(c.symbol)
                                 finish_if_all_closed(carryover_exit)
