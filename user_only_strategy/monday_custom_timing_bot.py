@@ -1864,8 +1864,7 @@ def main() -> None:
                             notifier.send(f"수동감시 즉시추가 실패 | {display_name(name, symbol)} | {type(exc).__name__}")
                 if added_names:
                     current_watch = watch_preview(watch_candidates) if watch_candidates else "-"
-                    notifier.send(f"수신확인 | 입력:{', '.join(added_names)} | 모니터링:{current_watch}")
-                    notifier.send(f"감시추가 | {', '.join(added_names)}")
+                    notifier.send(f"현재 모니터링종목 | {current_watch}")
                     if not watch_candidates and not is_daily_trade_finished(now_local.date()):
                         last_refresh = None
 
