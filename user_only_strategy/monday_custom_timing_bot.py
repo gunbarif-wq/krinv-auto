@@ -28,6 +28,8 @@ from fetch_kis_daily import get_access_token  # noqa: E402
 KST = ZoneInfo("Asia/Seoul")
 VTS_BASE_URL = "https://openapivts.koreainvestment.com:29443"
 PROD_BASE_URL = "https://openapi.koreainvestment.com:9443"
+DEFAULT_TRADING_OPEN_HHMM = 800
+DEFAULT_TRADING_CLOSE_HHMM = 2000
 
 
 def load_dotenv(dotenv_path: str = ".env") -> None:
@@ -860,12 +862,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--scan-interval-sec", type=int, default=60)
     p.add_argument("--max-cycles", type=int, default=200)
     p.add_argument("--bar-minutes", type=int, choices=[1, 3, 5], default=3)
-    p.add_argument("--refresh-start-hhmm", type=int, default=800)
-    p.add_argument("--refresh-end-hhmm", type=int, default=2000)
+    p.add_argument("--refresh-start-hhmm", type=int, default=DEFAULT_TRADING_OPEN_HHMM)
+    p.add_argument("--refresh-end-hhmm", type=int, default=DEFAULT_TRADING_CLOSE_HHMM)
     p.add_argument("--refresh-interval-min", type=int, default=120)
     p.add_argument("--empty-refresh-interval-min", type=int, default=120, help="refresh interval when no symbol passed filters")
-    p.add_argument("--market-open-hhmm", type=int, default=800)
-    p.add_argument("--market-close-hhmm", type=int, default=2000)
+    p.add_argument("--market-open-hhmm", type=int, default=DEFAULT_TRADING_OPEN_HHMM)
+    p.add_argument("--market-close-hhmm", type=int, default=DEFAULT_TRADING_CLOSE_HHMM)
     p.add_argument("--watch-report-interval-min", type=int, default=10, help="tracking report interval while watching selected symbols")
     p.add_argument("--initial-cash", type=float, default=10_000_000, help="account seed cash for position sizing")
     p.add_argument("--position-size-pct", type=float, default=0.20, help="max position size per symbol (0~1)")
@@ -904,14 +906,19 @@ def watch_preview(candidates: List["Candidate"], max_items: int = 12) -> str:
     return ", ".join(names)
 
 
-def in_korean_regular_session(now: datetime, market_open_hhmm: int, market_close_hhmm: int) -> bool:
+def in_korean_trading_session(now: datetime, market_open_hhmm: int, market_close_hhmm: int) -> bool:
     hhmm = now.hour * 100 + now.minute
-    return now.weekday() < 5 and int(market_open_hhmm) <= hhmm <= int(market_close_hhmm)
+    # NXT extended window for this strategy: open is inclusive, close is exclusive.
+    return now.weekday() < 5 and int(market_open_hhmm) <= hhmm < int(market_close_hhmm)
+
+
+def in_korean_regular_session(now: datetime, market_open_hhmm: int, market_close_hhmm: int) -> bool:
+    return in_korean_trading_session(now, market_open_hhmm, market_close_hhmm)
 
 
 def in_refresh_window(now: datetime, start_hhmm: int, end_hhmm: int) -> bool:
     hhmm = now.hour * 100 + now.minute
-    return now.weekday() < 5 and int(start_hhmm) <= hhmm <= int(end_hhmm)
+    return now.weekday() < 5 and int(start_hhmm) <= hhmm < int(end_hhmm)
 
 
 def is_network_block_error(exc: Exception) -> bool:
@@ -1375,11 +1382,11 @@ def main() -> None:
             and close_notified_day != now.date()
             and hhmm >= int(args.market_close_hhmm)
         ):
-            notifier.send("장종료: 오늘 운용 종료")
+            notifier.send("운영종료: 오늘 운용 종료")
             close_notified_day = now.date()
 
         if (
-            in_korean_regular_session(now, args.market_open_hhmm, args.market_close_hhmm)
+            in_korean_trading_session(now, args.market_open_hhmm, args.market_close_hhmm)
             and watch_candidates
             and (
                 last_watch_report is None
@@ -1389,7 +1396,7 @@ def main() -> None:
             notifier.send(f"추적관찰 중 {len(watch_candidates)}개 | {watch_preview(watch_candidates)}")
             last_watch_report = now
 
-        if not in_korean_regular_session(now, args.market_open_hhmm, args.market_close_hhmm) or not watch_candidates:
+        if not in_korean_trading_session(now, args.market_open_hhmm, args.market_close_hhmm) or not watch_candidates:
             if cycle + 1 < args.max_cycles:
                 time.sleep(max(1, int(args.scan_interval_sec)))
             continue
