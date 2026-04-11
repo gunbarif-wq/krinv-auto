@@ -30,6 +30,7 @@ VTS_BASE_URL = "https://openapivts.koreainvestment.com:29443"
 PROD_BASE_URL = "https://openapi.koreainvestment.com:9443"
 DEFAULT_TRADING_OPEN_HHMM = 800
 DEFAULT_TRADING_CLOSE_HHMM = 2000
+DEFAULT_MINUTE_MARKET_CODE = "UN"
 
 
 def load_dotenv(dotenv_path: str = ".env") -> None:
@@ -453,6 +454,7 @@ def fetch_minute_ohlcv(
     app_secret: str,
     symbol: str,
     count_hint: int = 180,
+    market_code: str = DEFAULT_MINUTE_MARKET_CODE,
 ) -> List[Dict[str, float]]:
     url = f"{base_url}/uapi/domestic-stock/v1/quotations/inquire-time-itemchartprice"
     headers = {
@@ -473,7 +475,7 @@ def fetch_minute_ohlcv(
     for _ in range(max_pages):
         params = {
             "FID_ETC_CLS_CODE": "",
-            "FID_COND_MRKT_DIV_CODE": "J",
+            "FID_COND_MRKT_DIV_CODE": (market_code or DEFAULT_MINUTE_MARKET_CODE).strip().upper(),
             "FID_INPUT_ISCD": symbol,
             "FID_INPUT_DATE_1": ymd,
             "FID_INPUT_HOUR_1": cursor_time,
@@ -725,6 +727,7 @@ def minute_filter(
     ma60_no_break_days: int,
     ma20_support_days: int,
     bar_minutes: int,
+    minute_market_code: str,
     progress_cb: Callable[[int, int, int, str], None] | None = None,
 ) -> Tuple[List[Candidate], Candidate | None]:
     selected: List[Candidate] = []
@@ -739,6 +742,7 @@ def minute_filter(
             app_secret=app_secret,
             symbol=symbol,
             count_hint=raw_count_hint_for_resampled_bars(90, bar_minutes),
+            market_code=minute_market_code,
         )
         bars = resample_bars(rows, bar_minutes=bar_minutes)
         if len(bars) < 70:
@@ -866,6 +870,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--scan-interval-sec", type=int, default=60)
     p.add_argument("--max-cycles", type=int, default=200)
     p.add_argument("--bar-minutes", type=int, choices=[1, 3, 5], default=3)
+    p.add_argument("--minute-market-code", default=os.getenv("KIS_MINUTE_MARKET_CODE", DEFAULT_MINUTE_MARKET_CODE), help="minute chart market code: UN includes NXT pre/after hours")
     p.add_argument("--refresh-start-hhmm", type=int, default=DEFAULT_TRADING_OPEN_HHMM)
     p.add_argument("--refresh-end-hhmm", type=int, default=DEFAULT_TRADING_CLOSE_HHMM)
     p.add_argument("--refresh-interval-min", type=int, default=120)
@@ -1337,6 +1342,7 @@ def main() -> None:
                         ma60_no_break_days=args.ma60_no_break_days,
                         ma20_support_days=args.ma20_support_days,
                         bar_minutes=args.bar_minutes,
+                        minute_market_code=args.minute_market_code,
                         progress_cb=lambda done, total, selected_cnt, cur: notifier.send(f"필터진행 {done}/{total} | 통과 {selected_cnt} | {cur}"),
                     )
                 except Exception as e:
@@ -1416,6 +1422,7 @@ def main() -> None:
                     app_secret=args.app_secret,
                     symbol=c.symbol,
                     count_hint=raw_count_hint_for_resampled_bars(80, args.bar_minutes),
+                    market_code=args.minute_market_code,
                 )
             except Exception as e:
                 if is_network_block_error(e):
