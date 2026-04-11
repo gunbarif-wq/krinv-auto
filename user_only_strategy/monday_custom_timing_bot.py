@@ -2040,9 +2040,7 @@ def main() -> None:
 
     def drop_nonholding_after_close() -> None:
         keep_symbols = {s for s, q in positions.items() if q > 0}
-        if manual_watch_symbols:
-            manual_watch_symbols.intersection_update(keep_symbols)
-        watch_candidates[:] = [c for c in watch_candidates if c.symbol in keep_symbols]
+        watch_candidates[:] = [c for c in watch_candidates if c.symbol in keep_symbols or c.symbol in manual_watch_symbols]
         persist_runtime_state()
 
     def poll_telegram_commands(now_local: datetime) -> None:
