@@ -1222,17 +1222,36 @@ def parse_telegram_watch_command(text: str, known_name_map: Dict[str, str]) -> T
     monitor_key = re.sub(r"\s+", "", raw)
     if "모니터" in monitor_key:
         return "status", []
-    payload = raw
-
-    resolved: List[Tuple[str, str]] = []
-    parts = [item.strip() for item in re.split(r"[,\n]+", payload) if item.strip()]
+    parts = [item.strip() for item in re.split(r"[,\n]+", raw) if item.strip()]
+    stop_parts: List[str] = []
+    watch_parts: List[str] = []
     for part in parts:
+        compact = re.sub(r"\s+", "", part)
+        if compact.endswith("중지"):
+            target = re.sub(r"\s*중지\s*$", "", part).strip()
+            if target:
+                stop_parts.append(target)
+        else:
+            watch_parts.append(part)
+
+    if stop_parts and not watch_parts:
+        resolved_stop: List[Tuple[str, str]] = []
+        for part in stop_parts:
+            symbol, name = resolve_watch_symbol(part, known_name_map)
+            if symbol:
+                label = name if (name and not str(name).isdigit()) else part
+                resolved_stop.append((symbol, label))
+        if resolved_stop:
+            return "unwatch", resolved_stop
+
+    resolved_watch: List[Tuple[str, str]] = []
+    for part in watch_parts:
         symbol, name = resolve_watch_symbol(part, known_name_map)
         if symbol:
             label = name if (name and not str(name).isdigit()) else part
-            resolved.append((symbol, label))
-    if resolved:
-        return "watch", resolved
+            resolved_watch.append((symbol, label))
+    if resolved_watch:
+        return "watch", resolved_watch
     return "ignore", []
 
 
@@ -2046,6 +2065,27 @@ def main() -> None:
             if action == "status":
                 current_watch = monitoring_preview()
                 notifier.send(f"현재 모니터링종목 | {current_watch}")
+                continue
+            if action == "unwatch":
+                removed_names: List[str] = []
+                kept_holdings: List[str] = []
+                for symbol, name in payload:
+                    manual_watch_symbols.discard(symbol)
+                    if positions.get(symbol, 0) > 0:
+                        kept_holdings.append(display_name(name, symbol))
+                        continue
+                    watch_candidates[:] = [c for c in watch_candidates if c.symbol != symbol]
+                    signal_first_seen_at.pop(symbol, None)
+                    removed_names.append(display_name(name, symbol))
+                persist_runtime_state()
+                current_watch = monitoring_preview()
+                if removed_names:
+                    notifier.send(f"모니터링중단 | {', '.join(removed_names)}")
+                if kept_holdings:
+                    notifier.send(f"보유중유지 | {', '.join(kept_holdings)}")
+                notifier.send(f"현재 모니터링종목 | {current_watch}")
+                if not watch_candidates and not is_daily_trade_finished(now_local.date()):
+                    last_refresh = None
                 continue
             if action == "watch":
                 added_names: List[str] = []
