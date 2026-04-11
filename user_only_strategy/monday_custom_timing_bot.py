@@ -1110,6 +1110,8 @@ def parse_telegram_watch_command(text: str, known_name_map: Dict[str, str]) -> T
     raw = str(text or "").strip()
     if not raw:
         return "ignore", []
+    if raw in {"모니터", "monitor", "MONITOR"}:
+        return "status", []
     payload = raw
 
     resolved: List[Tuple[str, str]] = []
@@ -1829,6 +1831,10 @@ def main() -> None:
                 continue
             action, payload = parse_telegram_watch_command(text, known_name_map)
             if action == "ignore":
+                continue
+            if action == "status":
+                current_watch = watch_preview(watch_candidates) if watch_candidates else "-"
+                notifier.send(f"현재 모니터링종목 | {current_watch}")
                 continue
             if action == "watch":
                 added_names: List[str] = []
