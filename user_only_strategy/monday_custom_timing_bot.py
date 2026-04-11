@@ -1808,6 +1808,20 @@ def main() -> None:
         ):
             finish_trading_day("보유 종목 청산 완료")
 
+    def monitoring_preview() -> str:
+        names: List[str] = []
+        for candidate in watch_candidates:
+            nm = display_name(candidate.name, candidate.symbol)
+            if nm not in names:
+                names.append(nm)
+        for symbol in sorted(manual_watch_symbols):
+            nm = display_name(known_name_map.get(symbol, symbol), symbol)
+            if nm not in names:
+                names.append(nm)
+        if not names:
+            return "-"
+        return ", ".join(names[: max(1, int(args.max_watch_candidates))])
+
     def poll_telegram_commands(now_local: datetime) -> None:
         nonlocal telegram_update_offset, last_telegram_poll_at, last_refresh
         if not args.telegram_bot_token or not args.telegram_chat_id:
@@ -1833,7 +1847,7 @@ def main() -> None:
             if action == "ignore":
                 continue
             if action == "status":
-                current_watch = watch_preview(watch_candidates) if watch_candidates else "-"
+                current_watch = monitoring_preview()
                 notifier.send(f"현재 모니터링종목 | {current_watch}")
                 continue
             if action == "watch":
@@ -1888,7 +1902,7 @@ def main() -> None:
                         except Exception as exc:
                             notifier.send(f"수동감시 즉시추가 실패 | {display_name(name, symbol)} | {type(exc).__name__}")
                 if added_names:
-                    current_watch = watch_preview(watch_candidates) if watch_candidates else "-"
+                    current_watch = monitoring_preview()
                     notifier.send(f"현재 모니터링종목 | {current_watch}")
                     if not watch_candidates and not is_daily_trade_finished(now_local.date()):
                         last_refresh = None
