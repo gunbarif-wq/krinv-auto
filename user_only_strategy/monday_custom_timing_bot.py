@@ -2038,7 +2038,7 @@ def main() -> None:
                 or (now - last_watch_report).total_seconds() >= max(60, int(args.watch_report_interval_min) * 60)
             )
         ):
-            notifier.send(f"추적관찰 중 {len(watch_candidates)}개 | {watch_preview(watch_candidates)}")
+            notifier.send(f"실시간 모니터링 | {watch_preview(watch_candidates)}")
             last_watch_report = now
 
         if not in_korean_trading_session(now, args.market_open_hhmm, args.market_close_hhmm) or not watch_candidates:
