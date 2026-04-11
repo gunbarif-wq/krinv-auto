@@ -2061,6 +2061,11 @@ def main() -> None:
                 continue
             action, payload = parse_telegram_watch_command(text, known_name_map)
             if action == "ignore":
+                refreshed_now = refresh_symbol_name_map_from_krx(args.symbol_name_file)
+                if refreshed_now > 0:
+                    known_name_map.update(load_symbol_name_map(args.symbol_name_file))
+                    action, payload = parse_telegram_watch_command(text, known_name_map)
+            if action == "ignore":
                 continue
             if action == "status":
                 current_watch = monitoring_preview()

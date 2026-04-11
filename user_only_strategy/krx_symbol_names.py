@@ -6,6 +6,8 @@ from pathlib import Path
 from typing import Dict
 from zoneinfo import ZoneInfo
 
+import requests
+
 
 KST = ZoneInfo("Asia/Seoul")
 DEFAULT_SYMBOL_NAME_FILE = str(Path(__file__).resolve().with_name("krx_symbol_names.json"))
@@ -49,28 +51,60 @@ def save_symbol_name_map(data: Dict[str, str], path_text: str = DEFAULT_SYMBOL_N
     return len(cleaned)
 
 
+def _load_from_kind_download() -> Dict[str, str]:
+    try:
+        import pandas as pd  # type: ignore
+    except Exception:
+        return {}
+    url = "https://kind.krx.co.kr/corpgeneral/corpList.do?method=download&searchType=13"
+    headers = {"User-Agent": "Mozilla/5.0"}
+    resp = requests.get(url, headers=headers, timeout=20)
+    resp.raise_for_status()
+    tables = pd.read_html(resp.text)
+    if not tables:
+        return {}
+    frame = tables[0]
+    cols = {str(col).strip(): col for col in frame.columns}
+    name_col = cols.get("회사명")
+    symbol_col = cols.get("종목코드")
+    if name_col is None or symbol_col is None:
+        return {}
+    names: Dict[str, str] = {}
+    for _, row in frame.iterrows():
+        symbol = str(row[symbol_col]).strip().split(".")[0].zfill(6)
+        name = str(row[name_col]).strip()
+        if symbol.isdigit() and len(symbol) == 6 and name and name.lower() != "nan":
+            names[symbol] = name
+    return names
+
+
 def refresh_symbol_name_map_from_krx(path_text: str = DEFAULT_SYMBOL_NAME_FILE) -> int:
+    names: Dict[str, str] = {}
     try:
         from pykrx import stock  # type: ignore
-    except Exception:
-        return 0
 
-    names: Dict[str, str] = {}
-    for market in ("KOSPI", "KOSDAQ", "KONEX"):
-        try:
-            tickers = stock.get_market_ticker_list(market=market)
-        except Exception:
-            continue
-        for ticker in tickers:
-            symbol = str(ticker).strip().zfill(6)
-            if not (symbol.isdigit() and len(symbol) == 6):
-                continue
+        for market in ("KOSPI", "KOSDAQ", "KONEX"):
             try:
-                name = str(stock.get_market_ticker_name(symbol) or "").strip()
+                tickers = stock.get_market_ticker_list(market=market)
             except Exception:
-                name = ""
-            if name:
-                names[symbol] = name
+                continue
+            for ticker in tickers:
+                symbol = str(ticker).strip().zfill(6)
+                if not (symbol.isdigit() and len(symbol) == 6):
+                    continue
+                try:
+                    name = str(stock.get_market_ticker_name(symbol) or "").strip()
+                except Exception:
+                    name = ""
+                if name:
+                    names[symbol] = name
+    except Exception:
+        names = {}
+    if not names:
+        try:
+            names = _load_from_kind_download()
+        except Exception:
+            names = {}
     if not names:
         return 0
     return save_symbol_name_map(names, path_text)
