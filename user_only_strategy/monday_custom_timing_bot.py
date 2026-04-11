@@ -1778,7 +1778,7 @@ def main() -> None:
 
     def finish_trading_day(reason: str) -> None:
         nonlocal strict_filtered_count, last_refresh, last_watch_report, daily_trade_finished_day, theme_selection_day
-        watch_candidates.clear()
+        watch_candidates[:] = []
         strict_filtered_count = 0
         last_refresh = datetime.now(KST)
         last_watch_report = None
@@ -1822,6 +1822,31 @@ def main() -> None:
             return "-"
         return ", ".join(names[: max(1, int(args.max_watch_candidates))])
 
+    def rebuild_manual_watch_candidates() -> List[Candidate]:
+        rebuilt: List[Candidate] = []
+        existing_by_symbol = {c.symbol: c for c in watch_candidates}
+        for symbol in sorted(manual_watch_symbols):
+            if len(rebuilt) >= max(1, int(args.max_watch_candidates)):
+                break
+            if symbol in existing_by_symbol:
+                rebuilt.append(existing_by_symbol[symbol])
+                continue
+            nm = known_name_map.get(symbol, symbol)
+            c = Candidate(
+                symbol=symbol,
+                name=nm,
+                close=0.0,
+                ma3=0.0,
+                ma5=0.0,
+                ma10=0.0,
+                ma20=0.0,
+                ma60=0.0,
+            )
+            c.theme_id = 99
+            c.theme_name = "수동감시"
+            rebuilt.append(c)
+        return rebuilt
+
     def poll_telegram_commands(now_local: datetime) -> None:
         nonlocal telegram_update_offset, last_telegram_poll_at, last_refresh
         if not args.telegram_bot_token or not args.telegram_chat_id:
@@ -1858,8 +1883,15 @@ def main() -> None:
                     added_names.append(display_name(name, symbol))
                     if all(candidate.symbol != symbol for candidate in watch_candidates):
                         if len(watch_candidates) >= max(1, int(args.max_watch_candidates)):
-                            notifier.send(f"수동감시 추가대기 | 감시최대 {int(args.max_watch_candidates)}개 도달")
-                            continue
+                            replaced = False
+                            for idx, existing in enumerate(watch_candidates):
+                                if existing.symbol not in manual_watch_symbols and positions.get(existing.symbol, 0) <= 0:
+                                    watch_candidates.pop(idx)
+                                    replaced = True
+                                    break
+                            if not replaced:
+                                notifier.send(f"수동감시 추가대기 | 감시최대 {int(args.max_watch_candidates)}개 도달")
+                                continue
                         # Keep manual symbols in watch list even off-session, so user can verify immediately.
                         candidate = Candidate(
                             symbol=symbol,
@@ -1923,7 +1955,7 @@ def main() -> None:
             bought_symbols_today.clear()
             blocked_unbuyable_symbols.clear()
             if not any(q > 0 for q in positions.values()):
-                watch_candidates.clear()
+                watch_candidates[:] = rebuild_manual_watch_candidates()
                 strict_filtered_count = 0
         poll_telegram_commands(now)
         if in_refresh_window(now, args.refresh_start_hhmm, args.refresh_end_hhmm):
@@ -2025,16 +2057,22 @@ def main() -> None:
                     raise
                 strict_filtered_count = len(leaders)
                 net_err_streak = 0
-                watch_candidates = []
+                merged_watch: List[Candidate] = rebuild_manual_watch_candidates()
                 if not leaders:
                     notifier.send("테마대장 선정 없음")
                 else:
-                    watch_candidates = leaders[: max(1, int(args.theme_count))]
+                    for leader in leaders:
+                        if len(merged_watch) >= max(1, int(args.max_watch_candidates)):
+                            break
+                        if any(x.symbol == leader.symbol for x in merged_watch):
+                            continue
+                        merged_watch.append(leader)
                     theme_selection_day = now.date()
                     notifier.send(f"테마선정 {len(theme_groups)}개")
                     for group in theme_groups:
                         notifier.send(f"테마그룹 | {format_theme_group(group)}")
-                    notifier.send(f"대장감시 {len(watch_candidates)}개 | {watch_preview(watch_candidates)}")
+                    notifier.send(f"대장감시 {len(merged_watch)}개 | {watch_preview(merged_watch)}")
+                watch_candidates = merged_watch
                 if watch_candidates:
                     notifier.send(f"추적 {len(watch_candidates)}개 | {watch_preview(watch_candidates)}")
                 last_refresh = datetime.now(KST)
