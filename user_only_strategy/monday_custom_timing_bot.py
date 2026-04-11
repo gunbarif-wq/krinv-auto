@@ -412,12 +412,12 @@ def fetch_candidate_universe(
 def format_candidate_preview(universe: List[Tuple[str, str]], limit: int = 9999) -> str:
     out: List[str] = []
     for symbol, name in universe[: max(1, int(limit))]:
-        out.append(name if name else symbol)
+        out.append(display_name(name, symbol))
     return ", ".join(out)
 
 
 def send_candidate_list_messages(notifier: "Notifier", universe: List[Tuple[str, str]], chunk_size: int = 25) -> None:
-    names = [(name if name else symbol) for symbol, name in universe]
+    names = [display_name(name, symbol) for symbol, name in universe]
     if not names:
         return
     total_parts = (len(names) + max(1, int(chunk_size)) - 1) // max(1, int(chunk_size))
@@ -960,7 +960,7 @@ def select_theme_leaders(
         signature = _movement_signature(bars)
         analyzed.append((candidate, signature))
         if progress_cb:
-            progress_cb(idx, total, len(analyzed), name if name else symbol)
+            progress_cb(idx, total, len(analyzed), display_name(name, symbol))
 
     if not analyzed:
         return [], []
@@ -1020,8 +1020,8 @@ def select_theme_leaders(
 
 
 def format_theme_group(group: ThemeGroup, limit: int = 5) -> str:
-    preview = ", ".join([(c.name if c.name else c.symbol) for c in group.members[: max(1, int(limit))]])
-    return f"{group.theme_id} | 대장 {group.leader_name} | 구성 {preview}"
+    preview = ", ".join([display_name(c.name, c.symbol) for c in group.members[: max(1, int(limit))]])
+    return f"{group.theme_id} | 대장 {display_name(group.leader_name, group.leader_symbol)} | 구성 {preview}"
 
 
 def extract_limit_up_price(prev: PreviousDayStats | None) -> float:
@@ -1284,7 +1284,7 @@ def minute_filter(
                     )
                 )
                 if progress_cb:
-                    progress_cb(idx, total, len(selected), name if name else symbol)
+                    progress_cb(idx, total, len(selected), display_name(name, symbol))
             continue
         close = np.asarray([r["close"] for r in bars], dtype=float)
         low = np.asarray([r["low"] for r in bars], dtype=float)
@@ -1348,7 +1348,7 @@ def minute_filter(
 
         selected.append(candidate)
         if progress_cb:
-            progress_cb(idx, total, len(selected), name if name else symbol)
+            progress_cb(idx, total, len(selected), display_name(name, symbol))
     if selected:
         selected.sort(key=lambda c: c.leader_score, reverse=True)
         if leader_only:
@@ -1470,8 +1470,15 @@ def watch_preview(candidates: List["Candidate"], max_items: int = 12) -> str:
         return "-"
     names = []
     for c in candidates[:max_items]:
-        names.append(c.name if c.name else c.symbol)
+        names.append(display_name(c.name, c.symbol))
     return ", ".join(names)
+
+
+def display_name(name: str, symbol: str = "") -> str:
+    n = str(name or "").strip()
+    if n and not n.isdigit():
+        return n
+    return "종목"
 
 
 def in_korean_trading_session(now: datetime, market_open_hhmm: int, market_close_hhmm: int) -> bool:
@@ -1825,7 +1832,7 @@ def main() -> None:
                 for symbol, name in payload:
                     manual_watch_symbols.add(symbol)
                     known_name_map[symbol] = name if name else symbol
-                    added_names.append(name if name else symbol)
+                    added_names.append(display_name(name, symbol))
                     if (
                         in_korean_trading_session(now_local, args.market_open_hhmm, args.market_close_hhmm)
                         and not is_daily_trade_finished(now_local.date())
@@ -1853,7 +1860,7 @@ def main() -> None:
                                 candidate.theme_name = "수동감시"
                                 watch_candidates.append(candidate)
                         except Exception as exc:
-                            notifier.send(f"수동감시 즉시추가 실패 | {name if name else symbol} | {type(exc).__name__}")
+                            notifier.send(f"수동감시 즉시추가 실패 | {display_name(name, symbol)} | {type(exc).__name__}")
                 if added_names:
                     current_watch = watch_preview(watch_candidates) if watch_candidates else "-"
                     notifier.send(f"수신확인 | 입력:{', '.join(added_names)} | 모니터링:{current_watch}")
@@ -2093,7 +2100,7 @@ def main() -> None:
                 if limit_up_price > 0 and intraday_high >= limit_up_price * 0.999:
                     if limit_up_hold_day.get(c.symbol) != now.date():
                         limit_up_hold_day[c.symbol] = now.date()
-                        notifier.send(f"상한가보유전환 | {c.name if c.name else c.symbol} | 기준 {limit_up_price:.0f}원")
+                        notifier.send(f"상한가보유전환 | {display_name(c.name, c.symbol)} | 기준 {limit_up_price:.0f}원")
                 hold_due_limit_today = limit_up_hold_day.get(c.symbol) == now.date()
                 if hold_due_limit_today:
                     continue
@@ -2128,7 +2135,7 @@ def main() -> None:
                     continue
                 carryover_exit = c.symbol in limit_up_hold_day and limit_up_hold_day.get(c.symbol) != now.date()
                 if args.dry_run:
-                    notifier.send(f"매도 {c.name if c.name else c.symbol} {qty}주 {close:.0f}원 (DRY) | {final_sell_reason}")
+                    notifier.send(f"매도 {display_name(c.name, c.symbol)} {qty}주 {close:.0f}원 (DRY) | {final_sell_reason}")
                     clear_position_state(c.symbol)
                     finish_if_all_closed(carryover_exit)
                 else:
@@ -2153,7 +2160,7 @@ def main() -> None:
                     ok = str(res.get("rt_cd", "")) == "0"
                     if ok:
                         odno = str(res.get("output", {}).get("ODNO", "")).strip()
-                        notifier.send(f"매도주문접수 {c.name if c.name else c.symbol} {qty}주 {close:.0f}원 | 주문번호:{odno} | {final_sell_reason}")
+                        notifier.send(f"매도주문접수 {display_name(c.name, c.symbol)} {qty}주 {close:.0f}원 | 주문번호:{odno} | {final_sell_reason}")
                         try:
                             status, filled_qty, ord_qty = wait_order_fill_status(
                                 base_url=args.base_url,
@@ -2171,20 +2178,20 @@ def main() -> None:
                                 continue
                             raise
                         if status == "filled":
-                            notifier.send(f"매도체결 {c.name if c.name else c.symbol} {filled_qty}주 | 주문번호:{odno}")
+                            notifier.send(f"매도체결 {display_name(c.name, c.symbol)} {filled_qty}주 | 주문번호:{odno}")
                             clear_position_state(c.symbol)
                             finish_if_all_closed(carryover_exit)
                         elif status == "partial":
-                            notifier.send(f"매도부분체결 {c.name if c.name else c.symbol} {filled_qty}/{max(ord_qty, qty)}주 | 주문번호:{odno}")
+                            notifier.send(f"매도부분체결 {display_name(c.name, c.symbol)} {filled_qty}/{max(ord_qty, qty)}주 | 주문번호:{odno}")
                             remain = max(0, qty - max(0, filled_qty))
                             positions[c.symbol] = remain
                             if remain <= 0:
                                 clear_position_state(c.symbol)
                                 finish_if_all_closed(carryover_exit)
                         else:
-                            notifier.send(f"매도미체결 {c.name if c.name else c.symbol} {filled_qty}/{max(ord_qty, qty)}주 | 주문번호:{odno}")
+                            notifier.send(f"매도미체결 {display_name(c.name, c.symbol)} {filled_qty}/{max(ord_qty, qty)}주 | 주문번호:{odno}")
                     else:
-                        notifier.send(f"매도실패 {c.name if c.name else c.symbol} {qty}주 {close:.0f}원")
+                        notifier.send(f"매도실패 {display_name(c.name, c.symbol)} {qty}주 {close:.0f}원")
         for c in watch_candidates:
             if c.symbol not in signaled_this_cycle and positions.get(c.symbol, 0) <= 0:
                 signal_first_seen_at.pop(c.symbol, None)
@@ -2213,10 +2220,10 @@ def main() -> None:
                         budget = max(0.0, float(args.initial_cash) * min(1.0, max(0.0, float(args.position_size_pct))))
                     qty = int(max(0.0, budget) // max(1.0, close))
                     if qty <= 0:
-                        notifier.send(f"매수스킵 {c.name if c.name else c.symbol} 수량0")
+                        notifier.send(f"매수스킵 {display_name(c.name, c.symbol)} 수량0")
                         continue
                     if args.dry_run:
-                        notifier.send(f"매수 {c.name if c.name else c.symbol} {qty}주 {close:.0f}원 (DRY) | {buy_tag} | 신호시각:{signal_at.strftime('%H:%M:%S')}")
+                        notifier.send(f"매수 {display_name(c.name, c.symbol)} {qty}주 {close:.0f}원 (DRY) | {buy_tag} | 신호시각:{signal_at.strftime('%H:%M:%S')}")
                         set_position_entry(c.symbol, qty, float(close))
                     else:
                         try:
@@ -2240,7 +2247,7 @@ def main() -> None:
                         ok = str(res.get("rt_cd", "")) == "0"
                         if ok:
                             odno = str(res.get("output", {}).get("ODNO", "")).strip()
-                            notifier.send(f"매수주문접수 {c.name if c.name else c.symbol} {qty}주 {close:.0f}원 | 주문번호:{odno} | {buy_tag} | 신호시각:{signal_at.strftime('%H:%M:%S')}")
+                            notifier.send(f"매수주문접수 {display_name(c.name, c.symbol)} {qty}주 {close:.0f}원 | 주문번호:{odno} | {buy_tag} | 신호시각:{signal_at.strftime('%H:%M:%S')}")
                             try:
                                 status, filled_qty, ord_qty = wait_order_fill_status(
                                     base_url=args.base_url,
@@ -2258,18 +2265,18 @@ def main() -> None:
                                     continue
                                 raise
                             if status == "filled":
-                                notifier.send(f"매수체결 {c.name if c.name else c.symbol} {filled_qty}주 | 주문번호:{odno} | {buy_tag}")
+                                notifier.send(f"매수체결 {display_name(c.name, c.symbol)} {filled_qty}주 | 주문번호:{odno} | {buy_tag}")
                                 set_position_entry(c.symbol, filled_qty, float(close))
                             elif status == "partial":
-                                notifier.send(f"매수부분체결 {c.name if c.name else c.symbol} {filled_qty}/{max(ord_qty, qty)}주 | 주문번호:{odno} | {buy_tag}")
+                                notifier.send(f"매수부분체결 {display_name(c.name, c.symbol)} {filled_qty}/{max(ord_qty, qty)}주 | 주문번호:{odno} | {buy_tag}")
                                 if filled_qty > 0:
                                     set_position_entry(c.symbol, filled_qty, float(close))
                             else:
-                                notifier.send(f"매수미체결 {c.name if c.name else c.symbol} {filled_qty}/{max(ord_qty, qty)}주 | 주문번호:{odno} | {buy_tag}")
+                                notifier.send(f"매수미체결 {display_name(c.name, c.symbol)} {filled_qty}/{max(ord_qty, qty)}주 | 주문번호:{odno} | {buy_tag}")
                                 blocked_unbuyable_symbols.add(c.symbol)
-                                notifier.send(f"제외등록 {c.name if c.name else c.symbol} | 매수미체결")
+                                notifier.send(f"제외등록 {display_name(c.name, c.symbol)} | 매수미체결")
                         else:
-                            notifier.send(f"매수실패 {c.name if c.name else c.symbol} {qty}주 {close:.0f}원 | {buy_tag}")
+                            notifier.send(f"매수실패 {display_name(c.name, c.symbol)} {qty}주 {close:.0f}원 | {buy_tag}")
         if cycle + 1 < args.max_cycles:
             time.sleep(max(1, int(args.scan_interval_sec)))
 
