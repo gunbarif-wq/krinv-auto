@@ -1308,6 +1308,168 @@ def early_momentum_buy_signal_from_minute_bars(
     return True, reason, score
 
 
+def _volume_ratio_from_rows(volume: np.ndarray, window: int = 20) -> Tuple[float, float]:
+    if volume.shape[0] < 3:
+        return 0.0, 0.0
+    base_window = min(max(3, int(window)), volume.shape[0] - 1)
+    vol_base = float(np.mean(volume[-base_window - 1 : -1])) if base_window >= 3 else float(np.mean(volume[:-1]))
+    vol_ratio = (float(volume[-1]) / vol_base) if vol_base > 1e-9 else 0.0
+    vol_cluster = float(np.sum(volume[-3:])) / max(1e-9, float(np.mean(volume[:-3])) * 3.0) if volume.shape[0] > 15 else vol_ratio
+    return vol_ratio, vol_cluster
+
+
+def _vwap_from_rows(high: np.ndarray, low: np.ndarray, close: np.ndarray, volume: np.ndarray) -> float:
+    v = np.maximum(volume, 0.0)
+    vol_sum = float(np.sum(v))
+    typical = (high + low + close) / 3.0
+    return float(np.sum(typical * v) / vol_sum) if vol_sum > 1e-9 else float(np.mean(close))
+
+
+def morning_phase_buy_signal_from_minute_bars(
+    rows: List[Dict[str, float]],
+    *,
+    early_end_hhmm: int,
+    min_gain_pct: float,
+    volume_mult: float,
+) -> Tuple[bool, str, float]:
+    if len(rows) < 20:
+        return False, "warmup", -1.0
+    hhmm = _bar_hhmm(rows[-1])
+    if hhmm > int(early_end_hhmm):
+        return False, "after_morning", -1.0
+
+    high = np.asarray([r["high"] for r in rows], dtype=float)
+    low = np.asarray([r["low"] for r in rows], dtype=float)
+    close = np.asarray([r["close"] for r in rows], dtype=float)
+    volume = np.asarray([r["volume"] for r in rows], dtype=float)
+    ma3 = sma(close, 3)
+    ma5 = sma(close, 5)
+    ma10 = sma(close, 10)
+    ma20 = sma(close, 20)
+    plus_di, minus_di, adx = dmi_adx(high, low, close, period=14)
+    imp, imp_signal, imp_hist = impulse_macd(high, low, close)
+    if not all(np.isfinite(v[-1]) for v in (ma3, ma5, ma10, ma20)):
+        return False, "ma_warmup", -1.0
+
+    open0 = float(rows[0]["open"])
+    gain = (float(close[-1]) / open0 - 1.0) if open0 > 1e-9 else 0.0
+    day_high = float(np.max(high))
+    high_keep = (float(close[-1]) / day_high) if day_high > 1e-9 else 0.0
+    vwap = _vwap_from_rows(high, low, close, volume)
+    vol_ratio, vol_cluster = _volume_ratio_from_rows(volume, window=20)
+    recent_high = float(np.max(high[-6:-1])) if len(rows) >= 7 else float(np.max(high[:-1]))
+
+    trend_ok = ma3[-1] >= ma5[-1] >= ma10[-1] * 0.998 and close[-1] >= ma5[-1] and close[-1] >= ma20[-1] * 0.995
+    breakout_ok = float(close[-1]) >= recent_high * 0.999
+    vwap_ok = float(close[-1]) >= vwap * 0.998
+    volume_ok = vol_ratio >= max(1.15, float(volume_mult) * 0.85) or vol_cluster >= max(1.25, float(volume_mult) * 0.80)
+    dmi_ok = (
+        np.isfinite(plus_di[-1])
+        and np.isfinite(minus_di[-1])
+        and np.isfinite(adx[-1])
+        and plus_di[-1] > minus_di[-1]
+        and adx[-1] >= 12.0
+    )
+    impulse_ok = (
+        np.isfinite(imp[-1])
+        and np.isfinite(imp_signal[-1])
+        and np.isfinite(imp_hist[-1])
+        and imp[-1] >= imp_signal[-1]
+        and imp_hist[-1] >= 0
+    )
+
+    ok = gain >= float(min_gain_pct) * 0.70 and trend_ok and breakout_ok and vwap_ok and volume_ok and (dmi_ok or impulse_ok) and high_keep >= 0.985
+    reason = (
+        f"오전 gain={gain*100:.2f}% breakout={breakout_ok} vwap={vwap_ok} "
+        f"vol={volume_ok} dmi={dmi_ok} impulse={impulse_ok} 고점유지={high_keep*100:.1f}%"
+    )
+    if not ok:
+        return False, reason, -1.0
+    score = 150.0 + (gain * 1200.0) + (6.0 * vol_ratio) + (25.0 if breakout_ok else 0.0) + (15.0 if high_keep >= 0.99 else 0.0)
+    return True, reason, score
+
+
+def afternoon_phase_buy_signal_from_minute_bars(
+    rows: List[Dict[str, float]],
+    *,
+    start_hhmm: int = 1300,
+    end_hhmm: int = 1420,
+) -> Tuple[bool, str, float]:
+    if len(rows) < 30:
+        return False, "warmup", -1.0
+    hhmm = _bar_hhmm(rows[-1])
+    if hhmm < int(start_hhmm) or hhmm >= int(end_hhmm):
+        return False, "outside_afternoon", -1.0
+
+    high = np.asarray([r["high"] for r in rows], dtype=float)
+    low = np.asarray([r["low"] for r in rows], dtype=float)
+    close = np.asarray([r["close"] for r in rows], dtype=float)
+    volume = np.asarray([r["volume"] for r in rows], dtype=float)
+    ma5 = sma(close, 5)
+    ma10 = sma(close, 10)
+    ma20 = sma(close, 20)
+    ma60 = sma(close, 60)
+    plus_di, minus_di, adx = dmi_adx(high, low, close, period=14)
+    imp, imp_signal, imp_hist = impulse_macd(high, low, close)
+    if not all(np.isfinite(v[-1]) for v in (ma5, ma10, ma20, ma60)):
+        return False, "ma_warmup", -1.0
+
+    vwap = _vwap_from_rows(high, low, close, volume)
+    vol_ratio, vol_cluster = _volume_ratio_from_rows(volume, window=18)
+    recent_pullback = float(np.min(low[-6:-1])) if len(rows) >= 7 else float(np.min(low[:-1]))
+    recent_high = float(np.max(high[-10:-1])) if len(rows) >= 11 else float(np.max(high[:-1]))
+    day_high = float(np.max(high))
+    near_high = float(close[-1]) >= day_high * 0.985
+
+    pullback_ok = recent_pullback >= ma20[-2] * 0.985 if np.isfinite(ma20[-2]) else False
+    reclaim_ok = float(close[-1]) >= max(ma5[-1], ma10[-1], vwap * 0.998)
+    breakout_ok = float(close[-1]) >= recent_high * 0.998
+    trend_ok = ma5[-1] >= ma10[-1] >= ma20[-1] * 0.998 and ma20[-1] >= ma60[-1] * 0.99
+    dmi_ok = np.isfinite(plus_di[-1]) and np.isfinite(minus_di[-1]) and plus_di[-1] >= minus_di[-1]
+    impulse_ok = (
+        np.isfinite(imp[-1])
+        and np.isfinite(imp_signal[-1])
+        and np.isfinite(imp_hist[-1])
+        and np.isfinite(imp_hist[-2])
+        and imp[-1] >= imp_signal[-1]
+        and imp_hist[-1] >= imp_hist[-2]
+    )
+    volume_ok = vol_ratio >= 1.15 or vol_cluster >= 1.20
+    adx_ok = np.isfinite(adx[-1]) and adx[-1] >= 12.0
+
+    ok = pullback_ok and reclaim_ok and breakout_ok and trend_ok and volume_ok and (dmi_ok or impulse_ok or adx_ok) and near_high
+    reason = (
+        f"오후 pullback={pullback_ok} reclaim={reclaim_ok} breakout={breakout_ok} "
+        f"trend={trend_ok} vol={volume_ok} near_high={near_high}"
+    )
+    if not ok:
+        return False, reason, -1.0
+    score = 135.0 + (20.0 if breakout_ok else 0.0) + (5.0 * vol_ratio) + (10.0 if near_high else 0.0)
+    return True, reason, score
+
+
+def timed_buy_signal_from_minute_bars(
+    rows: List[Dict[str, float]],
+    *,
+    early_end_hhmm: int,
+    min_gain_pct: float,
+    volume_mult: float,
+) -> Tuple[bool, str, float]:
+    hhmm = _bar_hhmm(rows[-1]) if rows else 0
+    morning_ok, morning_reason, morning_score = morning_phase_buy_signal_from_minute_bars(
+        rows,
+        early_end_hhmm=early_end_hhmm,
+        min_gain_pct=min_gain_pct,
+        volume_mult=volume_mult,
+    )
+    if morning_ok:
+        return True, morning_reason, morning_score
+    afternoon_ok, afternoon_reason, afternoon_score = afternoon_phase_buy_signal_from_minute_bars(rows)
+    if afternoon_ok:
+        return True, afternoon_reason, afternoon_score
+    return False, f"시간대불일치({hhmm})", -1.0
+
+
 def leader_score_from_minute_bars(rows: List[Dict[str, float]], prev: PreviousDayStats | None = None) -> Tuple[float, str]:
     if len(rows) < 3:
         return 0.0, "leader_warmup"
@@ -1724,6 +1886,82 @@ def buy_signal_from_minute_bars(rows: List[Dict[str, float]], adx_min: float) ->
     return ok, reason, score
 
 
+def near_buy_signal_from_minute_bars(rows: List[Dict[str, float]], adx_min: float) -> Tuple[bool, str, float]:
+    if len(rows) < 70:
+        return False, "warmup", -1.0
+    high = np.asarray([r["high"] for r in rows], dtype=float)
+    low = np.asarray([r["low"] for r in rows], dtype=float)
+    close = np.asarray([r["close"] for r in rows], dtype=float)
+    st_k, st_d = slow_stochastic(high, low, close, period=14, smooth_k=3, smooth_d=3)
+    plus_di, minus_di, adx = dmi_adx(high, low, close, period=14)
+    rsi14 = rsi(close, period=14)
+    mid, _, lower = bollinger(close, window=20, mult=2.0)
+    ma20 = sma(close, 20)
+    ma60 = sma(close, 60)
+    imp, imp_signal, imp_hist = impulse_macd(high, low, close)
+
+    stoch_near = (
+        np.isfinite(st_k[-1])
+        and np.isfinite(st_k[-2])
+        and np.isfinite(st_d[-1])
+        and st_k[-1] >= st_d[-1] - 3.0
+        and st_k[-1] >= st_k[-2]
+    )
+    dmi_near = (
+        np.isfinite(plus_di[-1])
+        and np.isfinite(minus_di[-1])
+        and plus_di[-1] >= minus_di[-1] * 0.92
+    )
+    adx_near = (
+        np.isfinite(adx[-1])
+        and np.isfinite(adx[-2])
+        and adx[-1] >= max(12.0, float(adx_min) * 0.80)
+        and adx[-1] >= adx[-2]
+    )
+    trend_near = (
+        np.isfinite(ma20[-1])
+        and np.isfinite(ma60[-1])
+        and close[-1] >= ma20[-1] * 0.995
+        and ma20[-1] >= ma60[-1] * 0.985
+    )
+    rsi_boll_near = (
+        np.isfinite(rsi14[-1])
+        and np.isfinite(mid[-1])
+        and np.isfinite(lower[-1])
+        and (
+            (rsi14[-1] >= 43 and close[-1] >= lower[-1])
+            or (close[-1] >= mid[-1] * 0.995)
+        )
+    )
+    impulse_near = (
+        np.isfinite(imp[-1])
+        and np.isfinite(imp_signal[-1])
+        and np.isfinite(imp_hist[-1])
+        and np.isfinite(imp_hist[-2])
+        and imp[-1] >= imp_signal[-1] - max(1e-6, abs(imp_signal[-1]) * 0.15)
+        and imp_hist[-1] >= imp_hist[-2]
+    )
+
+    conditions = {
+        "스토근접": stoch_near,
+        "DMI근접": dmi_near,
+        "ADX상승": adx_near,
+        "추세유지": trend_near,
+        "RSI볼린저": rsi_boll_near,
+        "임펄스예열": impulse_near,
+    }
+    passed = [label for label, ok in conditions.items() if ok]
+    ok = len(passed) >= 4 and stoch_near and dmi_near and trend_near
+    if not ok:
+        return False, " ".join(passed) if passed else "near-miss", -1.0
+    score = float(len(passed)) * 10.0
+    if np.isfinite(adx[-1]):
+        score += float(adx[-1])
+    if np.isfinite(st_k[-1]) and np.isfinite(st_d[-1]):
+        score += max(0.0, float(st_k[-1] - st_d[-1]))
+    return True, ",".join(passed), score
+
+
 def breakout_buy_signal_from_minute_bars(
     rows: List[Dict[str, float]],
     lookback_bars: int,
@@ -1884,6 +2122,7 @@ def main() -> None:
     last_telegram_poll_at: datetime | None = None
     last_slots_full_notice_at: datetime | None = None
     signal_first_seen_at: Dict[str, datetime] = {}
+    last_near_buy_notice_at: Dict[str, datetime] = {}
     net_err_streak = 0
     last_net_alert_at: datetime | None = None
 
@@ -2106,7 +2345,7 @@ def main() -> None:
                                     replaced = True
                                     break
                             if not replaced:
-                                notifier.send(f"수동감시 추가대기 | 감시최대 {int(args.max_watch_candidates)}개 도달")
+                                notifier.send(f"대기등록 | 자리나면 자동편입 ({int(args.max_watch_candidates)}개 사용중)")
                                 continue
                         # Keep manual symbols in watch list even off-session, so user can verify immediately.
                         candidate = Candidate(
@@ -2421,6 +2660,12 @@ def main() -> None:
             close = rows[-1]["close"]
             has_pos = positions.get(c.symbol, 0) > 0
             if not has_pos:
+                timed_ok, timed_reason, timed_score = timed_buy_signal_from_minute_bars(
+                    rows,
+                    early_end_hhmm=args.early_momentum_end_hhmm,
+                    min_gain_pct=args.early_momentum_min_gain_pct,
+                    volume_mult=args.early_momentum_volume_mult,
+                )
                 early_ok, early_reason, early_score = early_momentum_buy_signal_from_minute_bars(
                     rows,
                     early_end_hhmm=args.early_momentum_end_hhmm,
@@ -2428,6 +2673,7 @@ def main() -> None:
                     volume_mult=args.early_momentum_volume_mult,
                 )
                 buy_ok, buy_reason, buy_score = buy_signal_from_minute_bars(rows, adx_min=float(args.adx_min))
+                near_ok, near_reason, _near_score = near_buy_signal_from_minute_bars(rows, adx_min=float(args.adx_min))
                 brk_ok, brk_reason, brk_score = (False, "", -1.0)
                 if not args.disable_breakout_entry:
                     brk_ok, brk_reason, brk_score = breakout_buy_signal_from_minute_bars(
@@ -2438,17 +2684,30 @@ def main() -> None:
                         volume_mult=float(args.breakout_volume_mult),
                         adx_min=float(args.breakout_adx_min),
                     )
-                if not early_ok and not buy_ok and not brk_ok:
+                if not early_ok and not buy_ok and not brk_ok and near_ok:
+                    last_notice = last_near_buy_notice_at.get(c.symbol)
+                    if last_notice is None or (now - last_notice).total_seconds() >= 600:
+                        notifier.send(f"매수근접 | {display_name(c.name, c.symbol)} | {near_reason}")
+                        last_near_buy_notice_at[c.symbol] = now
+                if not timed_ok and not early_ok and not buy_ok and not brk_ok:
                     signal_first_seen_at.pop(c.symbol, None)
                     continue
+                last_near_buy_notice_at.pop(c.symbol, None)
                 chosen_score = buy_score
                 chosen_tag = f"기본:{buy_reason}"
-                if early_ok and early_score >= max(buy_score, brk_score):
+                if timed_ok and timed_score >= max(early_score, buy_score, brk_score):
+                    chosen_score = timed_score
+                    chosen_tag = f"시간대:{timed_reason}"
+                elif early_ok and early_score >= max(buy_score, brk_score):
                     chosen_score = early_score
                     chosen_tag = f"조기:{early_reason}"
                 elif brk_ok and brk_score >= buy_score:
                     chosen_score = brk_score
                     chosen_tag = f"돌파:{brk_reason}"
+                leader_bonus = min(60.0, max(0.0, float(c.leader_score)) * 0.12)
+                if c.theme_id > 0 and c.theme_name != "수동감시":
+                    chosen_score += leader_bonus
+                    chosen_tag = f"{chosen_tag} | 대장보너스={leader_bonus:.1f}"
                 signal_at = signal_first_seen_at.setdefault(c.symbol, now)
                 signaled_this_cycle.add(c.symbol)
                 buy_candidates.append((signal_at, chosen_score, c, float(close), chosen_tag))
