@@ -1889,15 +1889,22 @@ def main() -> None:
 
     refreshed_symbol_names = refresh_symbol_name_map_from_krx(args.symbol_name_file)
     loaded_symbol_names = load_symbol_name_map(args.symbol_name_file)
-    known_name_map.update(loaded_symbol_names)
+    symbol_name_store: Dict[str, str] = dict(loaded_symbol_names)
+    known_name_map.update(symbol_name_store)
     if refreshed_symbol_names > 0:
         notifier.send(f"종목명파일 갱신 {refreshed_symbol_names}개")
-    elif loaded_symbol_names:
-        notifier.send(f"종목명파일 로드 {len(loaded_symbol_names)}개")
+    elif symbol_name_store:
+        notifier.send(f"종목명파일 로드 {len(symbol_name_store)}개")
 
     def persist_symbol_name_map() -> None:
-        if known_name_map:
-            save_symbol_name_map(known_name_map, args.symbol_name_file)
+        merged = load_symbol_name_map(args.symbol_name_file)
+        merged.update(symbol_name_store)
+        merged.update({k: v for k, v in known_name_map.items() if str(k).isdigit() and str(v).strip() and not str(v).isdigit()})
+        if merged:
+            save_symbol_name_map(merged, args.symbol_name_file)
+            symbol_name_store.clear()
+            symbol_name_store.update(merged)
+            known_name_map.update(merged)
 
     saved_state = load_watch_state(args.watch_state_file)
     manual_watch_symbols.update(
@@ -2063,7 +2070,8 @@ def main() -> None:
             if action == "ignore":
                 refreshed_now = refresh_symbol_name_map_from_krx(args.symbol_name_file)
                 if refreshed_now > 0:
-                    known_name_map.update(load_symbol_name_map(args.symbol_name_file))
+                    symbol_name_store.update(load_symbol_name_map(args.symbol_name_file))
+                    known_name_map.update(symbol_name_store)
                     action, payload = parse_telegram_watch_command(text, known_name_map)
             if action == "ignore":
                 notifier.send(f"미인식입력 | {text}")
