@@ -33,6 +33,16 @@ DEFAULT_TRADING_OPEN_HHMM = 800
 DEFAULT_TRADING_CLOSE_HHMM = 2000
 DEFAULT_SEARCH_START_HHMM = 700
 DEFAULT_MINUTE_MARKET_CODE = "UN"
+SYMBOL_ALIAS_MAP = {
+    "하이닉스": "000660",
+    "sk하이닉스": "000660",
+    "에스케이하이닉스": "000660",
+    "삼전": "005930",
+    "삼성전자": "005930",
+    "넥스원": "079550",
+    "lig넥스원": "079550",
+    "엘아이지넥스원": "079550",
+}
 
 
 def load_dotenv(dotenv_path: str = ".env") -> None:
@@ -1071,19 +1081,23 @@ def resolve_watch_symbol(query: str, known_name_map: Dict[str, str]) -> Tuple[st
     if not raw:
         return "", ""
     compact = re.sub(r"[\s\-_/]", "", raw)
+    compact_l = compact.lower()
     if compact.upper().startswith("A") and compact[1:].isdigit():
         compact = compact[1:]
     if compact.isdigit() and 4 <= len(compact) <= 6:
         symbol = compact.zfill(6)
         return symbol, known_name_map.get(symbol, symbol)
+    alias_symbol = SYMBOL_ALIAS_MAP.get(compact_l) or SYMBOL_ALIAS_MAP.get(compact)
+    if alias_symbol:
+        return alias_symbol, known_name_map.get(alias_symbol, alias_symbol)
     normalized = compact
     for symbol, name in known_name_map.items():
-        if str(name).replace(" ", "") == normalized:
+        if str(name).replace(" ", "").lower() == normalized.lower():
             return symbol, name
     partial: List[Tuple[str, str]] = []
     for symbol, name in known_name_map.items():
-        nm = str(name).replace(" ", "")
-        if normalized and normalized in nm:
+        nm = str(name).replace(" ", "").lower()
+        if normalized and normalized.lower() in nm:
             partial.append((symbol, name))
     if len(partial) == 1:
         return partial[0]
