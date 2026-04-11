@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import json
 from datetime import datetime
+from html.parser import HTMLParser
 from pathlib import Path
-from typing import Dict
+from typing import Dict, List, Optional, Sequence
 from zoneinfo import ZoneInfo
 
 import requests
@@ -51,34 +52,107 @@ def save_symbol_name_map(data: Dict[str, str], path_text: str = DEFAULT_SYMBOL_N
     return len(cleaned)
 
 
-def _load_from_kind_download() -> Dict[str, str]:
+def _header_key(text: str) -> str:
+    return "".join(ch for ch in str(text).strip() if not ch.isspace())
+
+
+class _HtmlTableParser(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__()
+        self.tables: List[List[List[str]]] = []
+        self._in_table = False
+        self._in_row = False
+        self._in_cell = False
+        self._current_table: List[List[str]] = []
+        self._current_row: List[str] = []
+        self._cell_parts: List[str] = []
+
+    def handle_starttag(self, tag: str, attrs: Sequence[tuple[str, Optional[str]]]) -> None:
+        lower = tag.lower()
+        if lower == "table":
+            self._in_table = True
+            self._current_table = []
+        elif lower == "tr" and self._in_table:
+            self._in_row = True
+            self._current_row = []
+        elif lower in {"td", "th"} and self._in_row:
+            self._in_cell = True
+            self._cell_parts = []
+
+    def handle_endtag(self, tag: str) -> None:
+        lower = tag.lower()
+        if lower in {"td", "th"} and self._in_cell:
+            self._current_row.append("".join(self._cell_parts).strip())
+            self._cell_parts = []
+            self._in_cell = False
+        elif lower == "tr" and self._in_row:
+            if any(cell.strip() for cell in self._current_row):
+                self._current_table.append(self._current_row[:])
+            self._current_row = []
+            self._in_row = False
+        elif lower == "table" and self._in_table:
+            if self._current_table:
+                self.tables.append(self._current_table[:])
+            self._current_table = []
+            self._in_table = False
+
+    def handle_data(self, data: str) -> None:
+        if self._in_cell:
+            self._cell_parts.append(data)
+
+
+def _decode_kind_html(raw: bytes) -> str:
+    for encoding in ("euc-kr", "cp949", "utf-8"):
+        try:
+            text = raw.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+        if "\ud68c\uc0ac\uba85" in text or "\uc885\ubaa9\ucf54\ub4dc" in text:
+            return text
+    return raw.decode("utf-8", errors="ignore")
+
+
+def _extract_names_from_table(rows: Sequence[Sequence[str]]) -> Dict[str, str]:
+    if not rows:
+        return {}
+    header = [_header_key(cell) for cell in rows[0]]
     try:
-        import pandas as pd  # type: ignore
-    except Exception:
-        return {}
-    url = "https://kind.krx.co.kr/corpgeneral/corpList.do?method=download&searchType=13"
-    headers = {"User-Agent": "Mozilla/5.0"}
-    resp = requests.get(url, headers=headers, timeout=20)
-    resp.raise_for_status()
-    tables = pd.read_html(resp.text)
-    if not tables:
-        return {}
-    frame = tables[0]
-    cols = {str(col).strip(): col for col in frame.columns}
-    name_col = cols.get("회사명")
-    symbol_col = cols.get("종목코드")
-    if name_col is None or symbol_col is None:
+        name_idx = header.index("\ud68c\uc0ac\uba85")
+        symbol_idx = header.index("\uc885\ubaa9\ucf54\ub4dc")
+    except ValueError:
         return {}
     names: Dict[str, str] = {}
-    for _, row in frame.iterrows():
-        symbol = str(row[symbol_col]).strip().split(".")[0].zfill(6)
-        name = str(row[name_col]).strip()
-        if symbol.isdigit() and len(symbol) == 6 and name and name.lower() != "nan":
+    for row in rows[1:]:
+        if max(name_idx, symbol_idx) >= len(row):
+            continue
+        symbol = str(row[symbol_idx]).strip().split(".")[0].zfill(6)
+        name = str(row[name_idx]).strip()
+        if symbol.isdigit() and len(symbol) == 6 and name:
             names[symbol] = name
     return names
 
 
-def refresh_symbol_name_map_from_krx(path_text: str = DEFAULT_SYMBOL_NAME_FILE) -> int:
+def _load_from_kind_download() -> Dict[str, str]:
+    resp = requests.get(
+        "https://kind.krx.co.kr/corpgeneral/corpList.do",
+        headers={
+            "User-Agent": "Mozilla/5.0",
+            "Referer": "https://kind.krx.co.kr/corpgeneral/corpList.do",
+        },
+        params={"method": "download", "searchType": "13"},
+        timeout=20,
+    )
+    resp.raise_for_status()
+    parser = _HtmlTableParser()
+    parser.feed(_decode_kind_html(resp.content))
+    for table in parser.tables:
+        names = _extract_names_from_table(table)
+        if names:
+            return names
+    return {}
+
+
+def refresh_symbol_name_map_from_krx(path_text: str = DEFAULT_SYMBOL_NAME_FILE, verbose: bool = False) -> int:
     names: Dict[str, str] = {}
     try:
         from pykrx import stock  # type: ignore
@@ -86,7 +160,9 @@ def refresh_symbol_name_map_from_krx(path_text: str = DEFAULT_SYMBOL_NAME_FILE) 
         for market in ("KOSPI", "KOSDAQ", "KONEX"):
             try:
                 tickers = stock.get_market_ticker_list(market=market)
-            except Exception:
+            except Exception as exc:
+                if verbose:
+                    print(f"pykrx_market_error[{market}]={exc}")
                 continue
             for ticker in tickers:
                 symbol = str(ticker).strip().zfill(6)
@@ -98,13 +174,25 @@ def refresh_symbol_name_map_from_krx(path_text: str = DEFAULT_SYMBOL_NAME_FILE) 
                     name = ""
                 if name:
                     names[symbol] = name
-    except Exception:
+        if verbose:
+            print(f"pykrx_count={len(names)}")
+    except Exception as exc:
+        if verbose:
+            print(f"pykrx_error={exc}")
         names = {}
+
     if not names:
         try:
             names = _load_from_kind_download()
-        except Exception:
+            if verbose:
+                print(f"kind_count={len(names)}")
+        except Exception as exc:
+            if verbose:
+                print(f"kind_error={exc}")
             names = {}
+
     if not names:
+        if verbose:
+            print("krx_symbol_refresh_failed=1")
         return 0
     return save_symbol_name_map(names, path_text)

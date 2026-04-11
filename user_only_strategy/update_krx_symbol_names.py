@@ -15,8 +15,9 @@ from user_only_strategy.krx_symbol_names import DEFAULT_SYMBOL_NAME_FILE, refres
 def main() -> None:
     parser = argparse.ArgumentParser(description="Refresh KRX symbol-name cache file")
     parser.add_argument("--out", default=DEFAULT_SYMBOL_NAME_FILE)
+    parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args()
-    count = refresh_symbol_name_map_from_krx(args.out)
+    count = refresh_symbol_name_map_from_krx(args.out, verbose=args.verbose)
     print(f"saved={count} path={args.out}")
 
 
