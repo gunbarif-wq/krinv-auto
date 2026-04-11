@@ -1836,14 +1836,28 @@ def main() -> None:
                     manual_watch_symbols.add(symbol)
                     known_name_map[symbol] = name if name else symbol
                     added_names.append(display_name(name, symbol))
-                    if (
-                        in_korean_trading_session(now_local, args.market_open_hhmm, args.market_close_hhmm)
-                        and not is_daily_trade_finished(now_local.date())
-                        and all(candidate.symbol != symbol for candidate in watch_candidates)
-                    ):
+                    if all(candidate.symbol != symbol for candidate in watch_candidates):
                         if len(watch_candidates) >= max(1, int(args.max_watch_candidates)):
                             notifier.send(f"수동감시 추가대기 | 감시최대 {int(args.max_watch_candidates)}개 도달")
                             continue
+                        # Keep manual symbols in watch list even off-session, so user can verify immediately.
+                        candidate = Candidate(
+                            symbol=symbol,
+                            name=name if name else symbol,
+                            close=0.0,
+                            ma3=0.0,
+                            ma5=0.0,
+                            ma10=0.0,
+                            ma20=0.0,
+                            ma60=0.0,
+                        )
+                        candidate.theme_id = 99
+                        candidate.theme_name = "수동감시"
+                        watch_candidates.append(candidate)
+                    if (
+                        in_korean_trading_session(now_local, args.market_open_hhmm, args.market_close_hhmm)
+                        and not is_daily_trade_finished(now_local.date())
+                    ):
                         try:
                             prev = fetch_single_previous_day_stat(args.base_url, token, args.app_key, args.app_secret, symbol)
                             rows = fetch_minute_ohlcv(
@@ -1857,11 +1871,14 @@ def main() -> None:
                             )
                             bars = resample_bars(rows, bar_minutes=args.bar_minutes)
                             leader_score, leader_reason = leader_score_from_minute_bars(bars, prev) if bars else (0.0, "manual")
-                            candidate = _candidate_from_bars(symbol, known_name_map.get(symbol, symbol), bars, leader_score, leader_reason)
-                            if candidate is not None:
-                                candidate.theme_id = 99
-                                candidate.theme_name = "수동감시"
-                                watch_candidates.append(candidate)
+                            enriched = _candidate_from_bars(symbol, known_name_map.get(symbol, symbol), bars, leader_score, leader_reason)
+                            if enriched is not None:
+                                enriched.theme_id = 99
+                                enriched.theme_name = "수동감시"
+                                for idx, existing in enumerate(watch_candidates):
+                                    if existing.symbol == symbol:
+                                        watch_candidates[idx] = enriched
+                                        break
                         except Exception as exc:
                             notifier.send(f"수동감시 즉시추가 실패 | {display_name(name, symbol)} | {type(exc).__name__}")
                 if added_names:
