@@ -1847,6 +1847,12 @@ def main() -> None:
             rebuilt.append(c)
         return rebuilt
 
+    def drop_nonholding_after_close() -> None:
+        keep_symbols = {s for s, q in positions.items() if q > 0}
+        if manual_watch_symbols:
+            manual_watch_symbols.intersection_update(keep_symbols)
+        watch_candidates[:] = [c for c in watch_candidates if c.symbol in keep_symbols]
+
     def poll_telegram_commands(now_local: datetime) -> None:
         nonlocal telegram_update_offset, last_telegram_poll_at, last_refresh
         if not args.telegram_bot_token or not args.telegram_chat_id:
@@ -1873,7 +1879,7 @@ def main() -> None:
                 continue
             if action == "status":
                 current_watch = monitoring_preview()
-                notifier.send(f"현재 모니터링종목 | {current_watch}")
+                notifier.send(f"모니터 | 현재 모니터링종목 | {current_watch}")
                 continue
             if action == "watch":
                 added_names: List[str] = []
@@ -2085,6 +2091,7 @@ def main() -> None:
             and close_notified_day != now.date()
             and hhmm >= int(args.market_close_hhmm)
         ):
+            drop_nonholding_after_close()
             notifier.send("운영종료: 오늘 운용 종료")
             close_notified_day = now.date()
 
