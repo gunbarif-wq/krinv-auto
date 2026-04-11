@@ -1406,7 +1406,7 @@ class Notifier:
         self.message_prefix = message_prefix.strip()
 
     def send(self, text: str) -> None:
-        ts = datetime.now(KST).strftime("%Y-%m-%d %H:%M:%S")
+        ts = datetime.now(KST).strftime("%H:%M:%S")
         body = f"[{self.message_prefix}] {text}" if self.message_prefix else text
         line = f"[{ts}] {body}"
         print(line)
@@ -1759,7 +1759,7 @@ def main() -> None:
         Path(args.log_file),
         args.telegram_bot_token,
         args.telegram_chat_id,
-        message_prefix=f"{int(args.bar_minutes)}분봉",
+        message_prefix="",
     )
     extra_symbols = parse_symbol_csv(args.extra_symbols)
     if args.extra_symbols_file:
@@ -1919,7 +1919,7 @@ def main() -> None:
                 continue
             if action == "status":
                 current_watch = monitoring_preview()
-                notifier.send(f"모니터 | 현재 모니터링종목 | {current_watch}")
+                notifier.send(f"현재 모니터링종목 | {current_watch}")
                 continue
             if action == "watch":
                 added_names: List[str] = []
