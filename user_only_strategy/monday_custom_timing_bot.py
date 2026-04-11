@@ -681,11 +681,18 @@ class Candidate:
     ma10: float
     ma20: float
     ma60: float
+    leader_score: float = 0.0
+    leader_reason: str = ""
 
 
 def _parse_bar_datetime(v: float) -> datetime:
     s = str(int(v)).zfill(14)
     return datetime.strptime(s, "%Y%m%d%H%M%S")
+
+
+def _bar_hhmm(row: Dict[str, float]) -> int:
+    s = str(int(row["date"])).zfill(14)
+    return int(s[8:12])
 
 
 def resample_bars(rows: List[Dict[str, float]], bar_minutes: int) -> List[Dict[str, float]]:
@@ -717,6 +724,107 @@ def raw_count_hint_for_resampled_bars(target_bars: int, bar_minutes: int) -> int
     return max(180, int(target_bars) * max(1, int(bar_minutes)) + 30)
 
 
+def early_momentum_buy_signal_from_minute_bars(
+    rows: List[Dict[str, float]],
+    *,
+    early_end_hhmm: int,
+    min_gain_pct: float,
+    volume_mult: float,
+) -> Tuple[bool, str, float]:
+    if len(rows) < 12:
+        return False, "warmup", -1.0
+    hhmm = _bar_hhmm(rows[-1])
+    if hhmm > int(early_end_hhmm):
+        return False, "after_early", -1.0
+
+    high = np.asarray([r["high"] for r in rows], dtype=float)
+    close = np.asarray([r["close"] for r in rows], dtype=float)
+    volume = np.asarray([r["volume"] for r in rows], dtype=float)
+    ma3 = sma(close, 3)
+    ma5 = sma(close, 5)
+    ma10 = sma(close, 10)
+    if not all(np.isfinite(v[-1]) for v in (ma3, ma5, ma10)):
+        return False, "ma_warmup", -1.0
+
+    open0 = float(rows[0]["open"])
+    gain = (float(close[-1]) / open0 - 1.0) if open0 > 1e-9 else 0.0
+    trend_stack = ma3[-1] >= ma5[-1] >= ma10[-1] * 0.997 and close[-1] >= ma5[-1]
+
+    v = np.maximum(volume, 0.0)
+    vol_sum = float(np.sum(v))
+    typical = (np.asarray([r["high"] for r in rows], dtype=float) + np.asarray([r["low"] for r in rows], dtype=float) + close) / 3.0
+    vwap = float(np.sum(typical * v) / vol_sum) if vol_sum > 1e-9 else float(np.mean(close))
+    vwap_ok = float(close[-1]) >= vwap * 0.998
+
+    lookback = min(8, len(rows) - 1)
+    recent_high = float(np.max(high[-lookback - 1 : -1]))
+    breakout_ok = float(close[-1]) >= recent_high * 0.998
+
+    vol_window = min(20, len(rows) - 1)
+    vol_base = float(np.mean(volume[-vol_window - 1 : -1])) if vol_window >= 3 else float(np.mean(volume[:-1]))
+    vol_ratio = (float(volume[-1]) / vol_base) if vol_base > 1e-9 else 0.0
+    vol_cluster = float(np.sum(volume[-3:])) / max(1e-9, float(np.mean(volume[:-3])) * 3.0) if len(rows) > 15 else vol_ratio
+    volume_ok = vol_ratio >= max(1.0, float(volume_mult)) or vol_cluster >= max(1.2, float(volume_mult) * 0.85)
+
+    ok = gain >= float(min_gain_pct) and trend_stack and vwap_ok and (breakout_ok or volume_ok)
+    reason = (
+        f"early gain={gain*100:.2f}% trend={trend_stack} vwap={vwap_ok} "
+        f"breakout={breakout_ok} vol={volume_ok} vol_ratio={vol_ratio:.2f}"
+    )
+    if not ok:
+        return False, reason, -1.0
+    score = 120.0 + (gain * 1000.0) + (5.0 * vol_ratio) + (20.0 if breakout_ok else 0.0)
+    return True, reason, score
+
+
+def leader_score_from_minute_bars(rows: List[Dict[str, float]]) -> Tuple[float, str]:
+    if len(rows) < 3:
+        return 0.0, "leader_warmup"
+    high = np.asarray([r["high"] for r in rows], dtype=float)
+    low = np.asarray([r["low"] for r in rows], dtype=float)
+    close = np.asarray([r["close"] for r in rows], dtype=float)
+    volume = np.maximum(np.asarray([r["volume"] for r in rows], dtype=float), 0.0)
+
+    open0 = float(rows[0]["open"])
+    cur = float(close[-1])
+    day_high = float(np.max(high))
+    ret_pct = ((cur / open0) - 1.0) * 100.0 if open0 > 1e-9 else 0.0
+    high_ret_pct = ((day_high / open0) - 1.0) * 100.0 if open0 > 1e-9 else 0.0
+    high_keep_pct = (cur / day_high) * 100.0 if day_high > 1e-9 else 0.0
+
+    typical = (high + low + close) / 3.0
+    turnover_bil = float(np.sum(typical * volume) / 1_000_000_000.0)
+    ma3 = sma(close, 3)
+    ma5 = sma(close, 5)
+    ma10 = sma(close, 10)
+    trend_stack = bool(
+        np.isfinite(ma3[-1])
+        and np.isfinite(ma5[-1])
+        and np.isfinite(ma10[-1])
+        and ma3[-1] >= ma5[-1] >= ma10[-1] * 0.997
+        and cur >= ma5[-1]
+    )
+
+    if len(rows) > 20:
+        vol_base = float(np.mean(volume[:-3]))
+        vol_cluster = float(np.sum(volume[-3:])) / max(1e-9, vol_base * 3.0)
+    else:
+        vol_cluster = 1.0
+    score = (
+        (ret_pct * 8.0)
+        + (high_ret_pct * 3.0)
+        + (min(80.0, np.log1p(max(0.0, turnover_bil)) * 18.0))
+        + (min(30.0, vol_cluster * 6.0))
+        + (25.0 if high_keep_pct >= 97.0 else 0.0)
+        + (15.0 if trend_stack else 0.0)
+    )
+    reason = (
+        f"등락={ret_pct:.2f}% 고점={high_ret_pct:.2f}% 고점유지={high_keep_pct:.1f}% "
+        f"거래대금={turnover_bil:.1f}억 vol_cluster={vol_cluster:.2f} trend={trend_stack}"
+    )
+    return float(score), reason
+
+
 def minute_filter(
     base_url: str,
     token: str,
@@ -728,6 +836,11 @@ def minute_filter(
     ma20_support_days: int,
     bar_minutes: int,
     minute_market_code: str,
+    early_momentum_end_hhmm: int,
+    early_momentum_min_gain_pct: float,
+    early_momentum_volume_mult: float,
+    leader_only: bool,
+    leader_max_symbols: int,
     progress_cb: Callable[[int, int, int, str], None] | None = None,
 ) -> Tuple[List[Candidate], Candidate | None]:
     selected: List[Candidate] = []
@@ -745,7 +858,32 @@ def minute_filter(
             market_code=minute_market_code,
         )
         bars = resample_bars(rows, bar_minutes=bar_minutes)
+        leader_score, leader_reason = leader_score_from_minute_bars(bars)
+        early_ok, _, _ = early_momentum_buy_signal_from_minute_bars(
+            bars,
+            early_end_hhmm=early_momentum_end_hhmm,
+            min_gain_pct=early_momentum_min_gain_pct,
+            volume_mult=early_momentum_volume_mult,
+        )
         if len(bars) < 70:
+            if early_ok and bars:
+                close = np.asarray([r["close"] for r in bars], dtype=float)
+                selected.append(
+                    Candidate(
+                        symbol=symbol,
+                        name=name,
+                        close=float(close[-1]),
+                        ma3=float(close[-1]),
+                        ma5=float(close[-1]),
+                        ma10=float(close[-1]),
+                        ma20=float(close[-1]),
+                        ma60=float(close[-1]),
+                        leader_score=leader_score,
+                        leader_reason=leader_reason,
+                    )
+                )
+                if progress_cb:
+                    progress_cb(idx, total, len(selected), name if name else symbol)
             continue
         close = np.asarray([r["close"] for r in bars], dtype=float)
         low = np.asarray([r["low"] for r in bars], dtype=float)
@@ -791,6 +929,8 @@ def minute_filter(
             ma10=float(ma10[-1]),
             ma20=float(ma20[-1]),
             ma60=float(ma60[-1]),
+            leader_score=leader_score,
+            leader_reason=leader_reason,
         )
 
         # Lower score means "closer" to passing all daily/minute filters.
@@ -802,12 +942,16 @@ def minute_filter(
         bullish_stack = ma3[-1] >= ma5[-1] >= ma10[-1] and close[-1] >= ma20[-1] and close[-1] >= ma60[-1]
         aggressive_trend = bullish_stack and keep_60 and close[-1] >= ma20[-1]
 
-        if not ((pass_converge and pass_ma60 and keep_60 and keep_20) or aggressive_trend):
+        if not (((pass_converge and pass_ma60 and keep_60 and keep_20) or aggressive_trend) or early_ok):
             continue
 
         selected.append(candidate)
         if progress_cb:
             progress_cb(idx, total, len(selected), name if name else symbol)
+    if selected:
+        selected.sort(key=lambda c: c.leader_score, reverse=True)
+        if leader_only:
+            selected = selected[: max(1, int(leader_max_symbols))]
     return selected, nearest
 
 
@@ -875,6 +1019,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--refresh-end-hhmm", type=int, default=DEFAULT_TRADING_CLOSE_HHMM)
     p.add_argument("--refresh-interval-min", type=int, default=120)
     p.add_argument("--empty-refresh-interval-min", type=int, default=120, help="refresh interval when no symbol passed filters")
+    p.add_argument("--early-refresh-end-hhmm", type=int, default=1030, help="use faster refresh until this time for early theme leaders")
+    p.add_argument("--early-refresh-interval-min", type=int, default=3, help="refresh interval during early momentum window")
     p.add_argument("--market-open-hhmm", type=int, default=DEFAULT_TRADING_OPEN_HHMM)
     p.add_argument("--market-close-hhmm", type=int, default=DEFAULT_TRADING_CLOSE_HHMM)
     p.add_argument("--watch-report-interval-min", type=int, default=10, help="tracking report interval while watching selected symbols")
@@ -883,6 +1029,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--fallback-position-size-pct", type=float, default=0.10, help="position size for nearest fallback symbol (0~1)")
     p.add_argument("--max-buys-per-scan", type=int, default=2, help="max buy orders per scan cycle")
     p.add_argument("--max-positions", type=int, default=5, help="max concurrent holding symbols")
+    p.add_argument("--disable-leader-only", action="store_true", default=False, help="allow non-leader selected symbols too")
+    p.add_argument("--leader-max-symbols", type=int, default=1, help="number of theme leaders to keep when leader-only is enabled")
     p.add_argument("--order-krw", type=float, default=0.0, help="optional fixed order amount; 0 uses initial-cash * position-size-pct")
     p.add_argument("--ma-converge-pct", type=float, default=0.025)
     p.add_argument("--ma60-no-break-days", type=int, default=5, help="minute bars count for no-break check")
@@ -894,6 +1042,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--breakout-volume-window", type=int, default=20, help="bars for average volume baseline")
     p.add_argument("--breakout-volume-mult", type=float, default=1.4, help="required volume spike multiplier")
     p.add_argument("--breakout-adx-min", type=float, default=12.0, help="minimum adx for breakout entry")
+    p.add_argument("--early-momentum-end-hhmm", type=int, default=1030, help="allow early theme-leader momentum entries until this time")
+    p.add_argument("--early-momentum-min-gain-pct", type=float, default=0.015, help="minimum gain from first bar for early momentum entry")
+    p.add_argument("--early-momentum-volume-mult", type=float, default=1.6, help="volume spike multiplier for early momentum entry")
     p.add_argument("--sell-stop-loss-pct", type=float, default=0.015, help="hard stop loss from entry (e.g. 0.015=1.5%)")
     p.add_argument("--sell-trailing-stop-pct", type=float, default=0.02, help="trailing stop from peak (e.g. 0.02=2%)")
     p.add_argument("--sell-trailing-activate-pct", type=float, default=0.012, help="arm trailing stop after this gain from entry")
@@ -1293,7 +1444,10 @@ def main() -> None:
             need_refresh = last_refresh is None
             if last_refresh is not None:
                 elapsed = (now - last_refresh).total_seconds() / 60.0
-                refresh_interval_min = int(args.refresh_interval_min) if strict_filtered_count > 0 else int(args.empty_refresh_interval_min)
+                if hhmm <= int(args.early_refresh_end_hhmm):
+                    refresh_interval_min = int(args.early_refresh_interval_min)
+                else:
+                    refresh_interval_min = int(args.refresh_interval_min) if strict_filtered_count > 0 else int(args.empty_refresh_interval_min)
                 if elapsed >= max(1, refresh_interval_min):
                     need_refresh = True
             if last_refresh is None and suppress_initial_refresh_once:
@@ -1343,6 +1497,11 @@ def main() -> None:
                         ma20_support_days=args.ma20_support_days,
                         bar_minutes=args.bar_minutes,
                         minute_market_code=args.minute_market_code,
+                        early_momentum_end_hhmm=args.early_momentum_end_hhmm,
+                        early_momentum_min_gain_pct=args.early_momentum_min_gain_pct,
+                        early_momentum_volume_mult=args.early_momentum_volume_mult,
+                        leader_only=not args.disable_leader_only,
+                        leader_max_symbols=args.leader_max_symbols,
                         progress_cb=lambda done, total, selected_cnt, cur: notifier.send(f"필터진행 {done}/{total} | 통과 {selected_cnt} | {cur}"),
                     )
                 except Exception as e:
@@ -1369,6 +1528,9 @@ def main() -> None:
                     watch_candidates = filtered
                     preview = ", ".join([c.name if c.name else c.symbol for c in filtered[:8]])
                     notifier.send(f"선정 {len(filtered)}개 | {preview}")
+                    if not args.disable_leader_only and filtered:
+                        leader = filtered[0]
+                        notifier.send(f"대장주선정 | {leader.name if leader.name else leader.symbol} | 점수 {leader.leader_score:.1f} | {leader.leader_reason}")
                     holding_before = sum(1 for q in positions.values() if q > 0)
                     immediate_buy_symbols = {c.symbol for c in filtered[: max(1, int(args.max_buys_per_scan))]}
                     notifier.send(f"선정즉시매수 시도 | 최대 {max(1, int(args.max_buys_per_scan))}순위")
@@ -1440,6 +1602,12 @@ def main() -> None:
                 if c.symbol in immediate_buy_symbols:
                     buy_candidates.append((9999.0, c, float(close), "선정즉시"))
                     continue
+                early_ok, early_reason, early_score = early_momentum_buy_signal_from_minute_bars(
+                    rows,
+                    early_end_hhmm=args.early_momentum_end_hhmm,
+                    min_gain_pct=args.early_momentum_min_gain_pct,
+                    volume_mult=args.early_momentum_volume_mult,
+                )
                 buy_ok, buy_reason, buy_score = buy_signal_from_minute_bars(rows, adx_min=float(args.adx_min))
                 brk_ok, brk_reason, brk_score = (False, "", -1.0)
                 if not args.disable_breakout_entry:
@@ -1451,9 +1619,11 @@ def main() -> None:
                         volume_mult=float(args.breakout_volume_mult),
                         adx_min=float(args.breakout_adx_min),
                     )
-                if not buy_ok and not brk_ok:
+                if not early_ok and not buy_ok and not brk_ok:
                     continue
-                if brk_ok and brk_score >= buy_score:
+                if early_ok and early_score >= max(buy_score, brk_score):
+                    buy_candidates.append((early_score, c, float(close), f"조기:{early_reason}"))
+                elif brk_ok and brk_score >= buy_score:
                     buy_candidates.append((brk_score, c, float(close), f"돌파:{brk_reason}"))
                 else:
                     buy_candidates.append((buy_score, c, float(close), f"기본:{buy_reason}"))
