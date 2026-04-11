@@ -1593,7 +1593,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--log-file", default="logs/user_only_strategy_signals.txt")
     p.add_argument("--telegram-bot-token", default=os.getenv("TELEGRAM_BOT_TOKEN", ""))
     p.add_argument("--telegram-chat-id", default=os.getenv("TELEGRAM_CHAT_ID", ""))
-    p.add_argument("--telegram-command-poll-sec", type=int, default=15, help="telegram command polling interval")
+    p.add_argument("--telegram-command-poll-sec", type=int, default=3, help="telegram command polling interval")
     p.add_argument("--extra-symbols", default=os.getenv("NEXT_MARKET_SYMBOLS", ""), help="comma-separated extra symbols")
     p.add_argument("--extra-symbols-file", default=os.getenv("NEXT_MARKET_SYMBOLS_FILE", ""), help="extra symbols file path")
     p.add_argument("--symbol-name-file", default=os.getenv("KRX_SYMBOL_NAME_FILE", DEFAULT_SYMBOL_NAME_FILE))
@@ -2066,6 +2066,7 @@ def main() -> None:
                     known_name_map.update(load_symbol_name_map(args.symbol_name_file))
                     action, payload = parse_telegram_watch_command(text, known_name_map)
             if action == "ignore":
+                notifier.send(f"미인식입력 | {text}")
                 continue
             if action == "status":
                 current_watch = monitoring_preview()
@@ -2149,6 +2150,17 @@ def main() -> None:
                     notifier.send(f"현재 모니터링종목 | {current_watch}")
                     if not watch_candidates and not is_daily_trade_finished(now_local.date()):
                         last_refresh = None
+
+    def sleep_with_telegram_poll(total_sec: float) -> None:
+        remain = max(0.0, float(total_sec))
+        while remain > 0:
+            chunk = min(1.0, remain)
+            time.sleep(chunk)
+            remain -= chunk
+            try:
+                poll_telegram_commands(datetime.now(KST))
+            except Exception:
+                pass
 
     if not args.dry_run and args.cano and args.acnt_prdt_cd:
         try:
@@ -2303,7 +2315,7 @@ def main() -> None:
                     first_run_at_window_open = False
                     suppress_initial_refresh_once = False
                     if cycle + 1 < args.max_cycles:
-                        time.sleep(max(1, int(args.scan_interval_sec)))
+                        sleep_with_telegram_poll(max(1, int(args.scan_interval_sec)))
                     continue
                 try:
                     leaders, theme_groups = select_theme_leaders(
@@ -2371,7 +2383,7 @@ def main() -> None:
 
         if not in_korean_trading_session(now, args.market_open_hhmm, args.market_close_hhmm) or not watch_candidates:
             if cycle + 1 < args.max_cycles:
-                time.sleep(max(1, int(args.scan_interval_sec)))
+                sleep_with_telegram_poll(max(1, int(args.scan_interval_sec)))
             continue
         buy_candidates: List[Tuple[datetime, float, Candidate, float, str]] = []
         signaled_this_cycle: set[str] = set()
@@ -2546,7 +2558,7 @@ def main() -> None:
                 signal_first_seen_at.pop(c.symbol, None)
         if is_daily_trade_finished(now.date()):
             if cycle + 1 < args.max_cycles:
-                time.sleep(max(1, int(args.scan_interval_sec)))
+                sleep_with_telegram_poll(max(1, int(args.scan_interval_sec)))
             continue
         if buy_candidates:
             holding_count = sum(1 for q in positions.values() if q > 0)
@@ -2557,7 +2569,7 @@ def main() -> None:
                     notifier.send(f"매수대기 | 보유 {holding_count}/{int(args.max_positions)}종목으로 감시만 진행")
                     last_slots_full_notice_at = now
                 if cycle + 1 < args.max_cycles:
-                    time.sleep(max(1, int(args.scan_interval_sec)))
+                    sleep_with_telegram_poll(max(1, int(args.scan_interval_sec)))
                 continue
             if buys_left > 0:
                 # Priority: symbols whose buy signal appeared earlier are traded first.
@@ -2627,7 +2639,7 @@ def main() -> None:
                         else:
                             notifier.send(f"매수실패 {display_name(c.name, c.symbol)} {qty}주 {close:.0f}원 | {buy_tag}")
         if cycle + 1 < args.max_cycles:
-            time.sleep(max(1, int(args.scan_interval_sec)))
+            sleep_with_telegram_poll(max(1, int(args.scan_interval_sec)))
 
 
 if __name__ == "__main__":
