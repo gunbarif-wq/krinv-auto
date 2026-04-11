@@ -466,7 +466,11 @@ def fetch_minute_ohlcv(
     cursor_time = now.strftime("%H%M%S")
     out_map: Dict[str, Dict[str, float]] = {}
 
-    for _ in range(14):
+    # KIS returns roughly 30 one-minute rows per request. The NXT window can
+    # span about 12 hours, so the old fixed 14-page cap cut off morning data
+    # when the cursor was near 20:00.
+    max_pages = max(14, min(30, (max(30, int(count_hint)) + 29) // 30 + 2))
+    for _ in range(max_pages):
         params = {
             "FID_ETC_CLS_CODE": "",
             "FID_COND_MRKT_DIV_CODE": "J",
