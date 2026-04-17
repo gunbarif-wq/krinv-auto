@@ -1747,6 +1747,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--fallback-position-size-pct", type=float, default=0.10, help="position size for nearest fallback symbol (0~1)")
     p.add_argument("--max-buys-per-scan", type=int, default=2, help="max buy orders per scan cycle")
     p.add_argument("--max-positions", type=int, default=2, help="max concurrent holding symbols")
+    p.add_argument("--sync-holdings", action=argparse.BooleanOptionalAction, default=True, help="sync account holdings to monitor manual buys")
+    p.add_argument("--holdings-sync-interval-sec", type=int, default=30, help="how often to sync account holdings")
     p.add_argument("--theme-count", type=int, default=2, help="number of theme groups to keep")
     p.add_argument("--disable-leader-only", action="store_true", default=False, help="allow non-leader selected symbols too")
     p.add_argument("--leader-max-symbols", type=int, default=1, help="number of theme leaders to keep when leader-only is enabled")
@@ -2144,6 +2146,7 @@ def main() -> None:
     last_near_buy_notice_at: Dict[str, datetime] = {}
     net_err_streak = 0
     last_net_alert_at: datetime | None = None
+    last_holdings_sync_at: datetime | None = None
 
     refreshed_symbol_names = refresh_symbol_name_map_from_krx(args.symbol_name_file)
     loaded_symbol_names = load_symbol_name_map(args.symbol_name_file)
@@ -2153,6 +2156,69 @@ def main() -> None:
         notifier.send(f"종목명파일 갱신 {refreshed_symbol_names}개")
     elif symbol_name_store:
         notifier.send(f"종목명파일 로드 {len(symbol_name_store)}개")
+
+    def sync_holdings_from_account(now: datetime) -> None:
+        nonlocal last_holdings_sync_at
+        if args.dry_run or not bool(args.sync_holdings):
+            return
+        if not (args.cano and args.acnt_prdt_cd):
+            return
+        interval = max(5, int(args.holdings_sync_interval_sec))
+        if last_holdings_sync_at is not None and (now - last_holdings_sync_at).total_seconds() < interval:
+            return
+        last_holdings_sync_at = now
+        try:
+            holdings = fetch_account_holdings(
+                base_url=args.base_url,
+                token=token,
+                app_key=args.app_key,
+                app_secret=args.app_secret,
+                cano=args.cano,
+                acnt_prdt_cd=args.acnt_prdt_cd,
+            )
+        except Exception:
+            return
+        if not holdings:
+            return
+        added_any = False
+        for symbol, row in holdings.items():
+            qty = _to_int(row.get("qty"))
+            if qty <= 0:
+                continue
+            prev_qty = int(positions.get(symbol, 0))
+            positions[symbol] = qty
+            name = str(row.get("name", "")).strip()
+            if name:
+                known_name_map[symbol] = name
+                symbol_name_store[symbol] = name
+            avg_price = _to_float(row.get("avg_price"))
+            if avg_price > 0 and entry_price.get(symbol, 0.0) <= 0:
+                entry_price[symbol] = avg_price
+            if avg_price > 0 and peak_price.get(symbol, 0.0) <= 0:
+                peak_price[symbol] = avg_price
+            if symbol not in entry_time:
+                entry_time[symbol] = now
+            if prev_qty <= 0:
+                added_any = True
+                restored = Candidate(
+                    symbol=symbol,
+                    name=known_name_map.get(symbol, name or symbol),
+                    close=avg_price,
+                    ma3=0.0,
+                    ma5=0.0,
+                    ma10=0.0,
+                    ma20=0.0,
+                    ma60=0.0,
+                )
+                restored.theme_id = 98
+                restored.theme_name = "수동보유"
+                if all(candidate.symbol != symbol for candidate in watch_candidates):
+                    watch_candidates.append(restored)
+                notifier.send(f"수동보유 감지 | {display_name(restored.name, symbol)} {qty}주")
+        if added_any:
+            persist_symbol_name_map()
+            persist_runtime_state()
+            notifier.send(f"현재 모니터링종목 | {monitoring_preview()}")
 
     def persist_symbol_name_map() -> None:
         merged = load_symbol_name_map(args.symbol_name_file)
@@ -2501,7 +2567,10 @@ def main() -> None:
                 watch_candidates[:] = rebuild_manual_watch_candidates()
                 strict_filtered_count = 0
         poll_telegram_commands(now)
+        sync_holdings_from_account(now)
         if in_refresh_window(now, args.refresh_start_hhmm, args.refresh_end_hhmm):
+            holding_count = sum(1 for q in positions.values() if q > 0)
+            slots_left = max(0, int(args.max_positions) - holding_count)
             need_refresh = last_refresh is None
             if last_refresh is not None:
                 elapsed = (now - last_refresh).total_seconds() / 60.0
@@ -2518,6 +2587,13 @@ def main() -> None:
                 last_refresh = now
                 need_refresh = False
                 suppress_initial_refresh_once = False
+            if slots_left <= 0:
+                # When slots are full, do not waste API calls on reselection; keep monitoring for exits.
+                if last_slots_full_notice_at is None or (now - last_slots_full_notice_at).total_seconds() >= 600:
+                    notifier.send(f"재선정중지: 보유 {holding_count}/{int(args.max_positions)}종목으로 감시만 진행")
+                    last_slots_full_notice_at = now
+                last_refresh = now
+                need_refresh = False
             if need_refresh:
                 tracking_active = bool(watch_candidates and strict_filtered_count > 0) or any(q > 0 for q in positions.values()) or is_daily_trade_finished(now.date()) or theme_selection_day == now.date()
                 if tracking_active:
