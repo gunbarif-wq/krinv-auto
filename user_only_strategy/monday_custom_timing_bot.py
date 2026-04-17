@@ -54,6 +54,22 @@ SYMBOL_ALIAS_MAP = {
 }
 
 
+class _HttpThrottle:
+    def __init__(self, min_interval_sec: float) -> None:
+        self.min_interval_sec = float(min_interval_sec)
+        self._last_at = 0.0
+
+    def wait(self) -> None:
+        now = time.time()
+        delta = now - self._last_at
+        if delta < self.min_interval_sec:
+            time.sleep(self.min_interval_sec - delta)
+        self._last_at = time.time()
+
+
+HTTP_THROTTLE = _HttpThrottle(float(os.getenv("KIS_HTTP_MIN_INTERVAL_SEC", "0.35")))
+
+
 def load_dotenv(dotenv_path: str = ".env") -> None:
     path = Path(dotenv_path)
     if not path.exists():
@@ -86,6 +102,7 @@ def request_json_with_retry(
     last_err: Exception | None = None
     for i in range(max(1, retries)):
         try:
+            HTTP_THROTTLE.wait()
             if method.lower() == "get":
                 r = requests.get(url, headers=headers, params=params, timeout=timeout)
             else:
@@ -120,6 +137,7 @@ def order_inquiry_tr_id(base_url: str) -> str:
 def get_hashkey(base_url: str, app_key: str, app_secret: str, body: Dict) -> str:
     url = f"{base_url}/uapi/hashkey"
     headers = {"appKey": app_key, "appSecret": app_secret, "content-type": "application/json"}
+    HTTP_THROTTLE.wait()
     r = requests.post(url, headers=headers, data=json.dumps(body), timeout=15)
     r.raise_for_status()
     return r.json().get("HASH", "")
@@ -159,9 +177,18 @@ def place_order(
         "hashkey": hashkey,
         "content-type": "application/json",
     }
+    HTTP_THROTTLE.wait()
     r = requests.post(url, headers=headers, data=json.dumps(body), timeout=15)
     if r.status_code >= 400:
-        return {"rt_cd": "1", "msg1": f"http_{r.status_code} {r.text[:220]}"}
+        try:
+            data = r.json()
+            return {
+                "rt_cd": "1",
+                "msg_cd": str(data.get("msg_cd", "")).strip(),
+                "msg1": f"http_{r.status_code} {json.dumps(data, ensure_ascii=False)}",
+            }
+        except Exception:
+            return {"rt_cd": "1", "msg1": f"http_{r.status_code} {r.text[:220]}"}
     return r.json()
 
 
@@ -182,6 +209,12 @@ def format_kis_error(res: Dict) -> str:
             extra = " | " + " ".join(parts)[:120]
     base = f"rt_cd={rt_cd} msg_cd={msg_cd} msg1={msg1}".strip()
     return (base + extra).strip()
+
+
+def is_rate_limited_error(res: Dict) -> bool:
+    msg_cd = str(res.get("msg_cd", "")).strip()
+    msg1 = str(res.get("msg1", "")).strip()
+    return "EGW00201" in msg_cd or "EGW00201" in msg1 or "초당 거래건수" in msg1
 
 
 def _to_int(value: str | int | float | None) -> int:
@@ -260,10 +293,11 @@ def wait_order_fill_status(
     odno: str,
     *,
     retries: int = 3,
-    sleep_sec: float = 1.0,
+    sleep_sec: float = 1.2,
 ) -> Tuple[str, int, int]:
     last_status = ("pending", 0, 0)
     for i in range(max(1, retries)):
+        time.sleep(max(0.2, float(sleep_sec)))
         row = inquire_daily_order_row(
             base_url=base_url,
             token=token,
@@ -281,8 +315,6 @@ def wait_order_fill_status(
             if filled > 0:
                 return ("partial", filled, ord_qty)
             last_status = ("pending", filled, ord_qty)
-        if i + 1 < retries:
-            time.sleep(max(0.2, float(sleep_sec)))
     return last_status
 
 
@@ -2147,6 +2179,7 @@ def main() -> None:
     last_near_buy_notice_at: Dict[str, datetime] = {}
     net_err_streak = 0
     last_net_alert_at: datetime | None = None
+    order_cooldown_until: Dict[str, datetime] = {}
     last_holdings_sync_at: datetime | None = None
 
     refreshed_symbol_names = refresh_symbol_name_map_from_krx(args.symbol_name_file)
@@ -2941,6 +2974,9 @@ def main() -> None:
                 # Priority: symbols whose buy signal appeared earlier are traded first.
                 ranked = sorted(buy_candidates, key=lambda x: (x[0], -x[1]))
                 for signal_at, score, c, close, buy_tag in ranked[:buys_left]:
+                    cooldown_until = order_cooldown_until.get(c.symbol)
+                    if cooldown_until and now < cooldown_until:
+                        continue
                     if float(args.order_krw) > 0:
                         budget = float(args.order_krw)
                     else:
@@ -3003,9 +3039,15 @@ def main() -> None:
                                 blocked_unbuyable_symbols.add(c.symbol)
                                 notifier.send(f"제외등록 {display_name(c.name, c.symbol)} | 매수미체결")
                         else:
-                            notifier.send(
-                                f"매수실패 {display_name(c.name, c.symbol)} {qty}주 {close:.0f}원 | {buy_tag} | {format_kis_error(res)}"
-                            )
+                            if is_rate_limited_error(res):
+                                order_cooldown_until[c.symbol] = now + timedelta(seconds=15)
+                                notifier.send(
+                                    f"매수지연 {display_name(c.name, c.symbol)} | 호출제한 15초대기 | {buy_tag} | {format_kis_error(res)}"
+                                )
+                            else:
+                                notifier.send(
+                                    f"매수실패 {display_name(c.name, c.symbol)} {qty}주 {close:.0f}원 | {buy_tag} | {format_kis_error(res)}"
+                                )
         if cycle + 1 < args.max_cycles:
             sleep_with_telegram_poll(max(1, int(args.scan_interval_sec)))
 
