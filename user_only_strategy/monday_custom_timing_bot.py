@@ -1275,6 +1275,8 @@ def parse_telegram_watch_command(text: str, known_name_map: Dict[str, str]) -> T
         return "status", []
     parts = [item.strip() for item in re.split(r"[,\n]+", raw) if item.strip()]
     stop_parts: List[str] = []
+    buy_parts: List[str] = []
+    sell_parts: List[str] = []
     watch_parts: List[str] = []
     for part in parts:
         compact = re.sub(r"\s+", "", part)
@@ -1282,6 +1284,14 @@ def parse_telegram_watch_command(text: str, known_name_map: Dict[str, str]) -> T
             target = re.sub(r"\s*중지\s*$", "", part).strip()
             if target:
                 stop_parts.append(target)
+        elif compact.endswith("매수"):
+            target = re.sub(r"\s*매수\s*$", "", part).strip()
+            if target:
+                buy_parts.append(target)
+        elif compact.endswith("매도"):
+            target = re.sub(r"\s*매도\s*$", "", part).strip()
+            if target:
+                sell_parts.append(target)
         else:
             watch_parts.append(part)
 
@@ -1294,6 +1304,26 @@ def parse_telegram_watch_command(text: str, known_name_map: Dict[str, str]) -> T
                 resolved_stop.append((symbol, label))
         if resolved_stop:
             return "unwatch", resolved_stop
+
+    if buy_parts and not watch_parts and not stop_parts and not sell_parts:
+        resolved_buy: List[Tuple[str, str]] = []
+        for part in buy_parts:
+            symbol, name = resolve_watch_symbol(part, known_name_map)
+            if symbol:
+                label = name if (name and not str(name).isdigit()) else part
+                resolved_buy.append((symbol, label))
+        if resolved_buy:
+            return "buy", resolved_buy
+
+    if sell_parts and not watch_parts and not stop_parts and not buy_parts:
+        resolved_sell: List[Tuple[str, str]] = []
+        for part in sell_parts:
+            symbol, name = resolve_watch_symbol(part, known_name_map)
+            if symbol:
+                label = name if (name and not str(name).isdigit()) else part
+                resolved_sell.append((symbol, label))
+        if resolved_sell:
+            return "sell", resolved_sell
 
     resolved_watch: List[Tuple[str, str]] = []
     for part in watch_parts:
@@ -2357,6 +2387,29 @@ def main() -> None:
         ):
             finish_trading_day("보유 종목 청산 완료")
 
+    def refresh_manual_candidate(symbol: str, name: str) -> Candidate | None:
+        try:
+            prev = fetch_single_previous_day_stat(args.base_url, token, args.app_key, args.app_secret, symbol)
+            rows = fetch_minute_ohlcv(
+                base_url=args.base_url,
+                token=token,
+                app_key=args.app_key,
+                app_secret=args.app_secret,
+                symbol=symbol,
+                count_hint=raw_count_hint_for_resampled_bars(80, args.bar_minutes),
+                market_code=args.minute_market_code,
+            )
+            bars = resample_bars(rows, bar_minutes=args.bar_minutes)
+            leader_score, leader_reason = leader_score_from_minute_bars(bars, prev) if bars else (0.0, "manual")
+            enriched = _candidate_from_bars(symbol, known_name_map.get(symbol, name), bars, leader_score, leader_reason)
+            if enriched is not None:
+                enriched.theme_id = 99
+                enriched.theme_name = "수동감시"
+            return enriched
+        except Exception as exc:
+            notifier.send(f"수동감시 즉시추가 실패 | {display_name(name, symbol)} | {type(exc).__name__}")
+            return None
+
     def monitoring_preview() -> str:
         names: List[str] = []
         for candidate in watch_candidates:
@@ -2436,6 +2489,136 @@ def main() -> None:
                 current_watch = monitoring_preview()
                 notifier.send(f"현재 모니터링종목 | {current_watch}")
                 continue
+            if action == "buy":
+                for symbol, name in payload[:1]:
+                    holding_count = sum(1 for q in positions.values() if q > 0)
+                    if positions.get(symbol, 0) <= 0 and holding_count >= int(args.max_positions):
+                        notifier.send(f"수동매수거부 | 보유 {holding_count}/{int(args.max_positions)}종목 | {display_name(name, symbol)}")
+                        continue
+                    candidate = refresh_manual_candidate(symbol, name)
+                    close = float(candidate.close) if candidate is not None else 0.0
+                    if close <= 0:
+                        notifier.send(f"수동매수실패 | 현재가 확인불가 | {display_name(name, symbol)}")
+                        continue
+                    if float(args.order_krw) > 0:
+                        budget = float(args.order_krw)
+                    else:
+                        budget = max(0.0, float(args.initial_cash) * min(1.0, max(0.0, float(args.position_size_pct))))
+                    qty = int(max(0.0, budget) // max(1.0, close))
+                    if qty <= 0:
+                        notifier.send(f"수동매수실패 | 수량0 | {display_name(name, symbol)}")
+                        continue
+                    try:
+                        res = place_order(
+                            base_url=args.base_url,
+                            token=token,
+                            app_key=args.app_key,
+                            app_secret=args.app_secret,
+                            cano=args.cano,
+                            acnt_prdt_cd=args.acnt_prdt_cd,
+                            symbol=symbol,
+                            qty=qty,
+                            side="buy",
+                        )
+                    except Exception as e:
+                        if is_network_block_error(e):
+                            wait_sec = notify_net_error(e)
+                            time.sleep(wait_sec)
+                            notifier.send(f"수동매수실패 | 네트워크 | {display_name(name, symbol)}")
+                            continue
+                        raise
+                    ok = str(res.get("rt_cd", "")) == "0"
+                    if ok:
+                        odno = str(res.get("output", {}).get("ODNO", "")).strip()
+                        notifier.send(f"수동매수주문 {display_name(name, symbol)} {qty}주 {close:.0f}원 | 주문번호:{odno}")
+                        status, filled_qty, ord_qty = wait_order_fill_status(
+                            base_url=args.base_url,
+                            token=token,
+                            app_key=args.app_key,
+                            app_secret=args.app_secret,
+                            cano=args.cano,
+                            acnt_prdt_cd=args.acnt_prdt_cd,
+                            odno=odno,
+                        )
+                        if status in {"filled", "partial"} and filled_qty > 0:
+                            set_position_entry(symbol, filled_qty, float(close))
+                            manual_watch_symbols.add(symbol)
+                            known_name_map[symbol] = name if name else symbol
+                            if all(existing.symbol != symbol for existing in watch_candidates):
+                                new_candidate = candidate or Candidate(symbol=symbol, name=name, close=close, ma3=0.0, ma5=0.0, ma10=0.0, ma20=0.0, ma60=0.0)
+                                new_candidate.theme_id = 99
+                                new_candidate.theme_name = "수동감시"
+                                watch_candidates.append(new_candidate)
+                            persist_runtime_state()
+                            notifier.send(f"수동매수체결 {display_name(name, symbol)} {filled_qty}/{max(ord_qty, qty)}주")
+                        else:
+                            notifier.send(f"수동매수미체결 {display_name(name, symbol)} {filled_qty}/{max(ord_qty, qty)}주 | 주문번호:{odno}")
+                    else:
+                        notifier.send(f"수동매수실패 {display_name(name, symbol)} {qty}주 {close:.0f}원 | {format_kis_error(res)}")
+                continue
+            if action == "sell":
+                for symbol, name in payload[:1]:
+                    qty = int(positions.get(symbol, 0))
+                    if qty <= 0:
+                        holdings = fetch_account_holdings(
+                            base_url=args.base_url,
+                            token=token,
+                            app_key=args.app_key,
+                            app_secret=args.app_secret,
+                            cano=args.cano,
+                            acnt_prdt_cd=args.acnt_prdt_cd,
+                        )
+                        qty = int((holdings.get(symbol) or {}).get("qty", 0))
+                    if qty <= 0:
+                        notifier.send(f"수동매도실패 | 보유수량없음 | {display_name(name, symbol)}")
+                        continue
+                    candidate = refresh_manual_candidate(symbol, name)
+                    close = float(candidate.close) if candidate is not None else 0.0
+                    try:
+                        res = place_order(
+                            base_url=args.base_url,
+                            token=token,
+                            app_key=args.app_key,
+                            app_secret=args.app_secret,
+                            cano=args.cano,
+                            acnt_prdt_cd=args.acnt_prdt_cd,
+                            symbol=symbol,
+                            qty=qty,
+                            side="sell",
+                        )
+                    except Exception as e:
+                        if is_network_block_error(e):
+                            wait_sec = notify_net_error(e)
+                            time.sleep(wait_sec)
+                            notifier.send(f"수동매도실패 | 네트워크 | {display_name(name, symbol)}")
+                            continue
+                        raise
+                    ok = str(res.get("rt_cd", "")) == "0"
+                    if ok:
+                        odno = str(res.get("output", {}).get("ODNO", "")).strip()
+                        notifier.send(f"수동매도주문 {display_name(name, symbol)} {qty}주 {close:.0f}원 | 주문번호:{odno}")
+                        status, filled_qty, ord_qty = wait_order_fill_status(
+                            base_url=args.base_url,
+                            token=token,
+                            app_key=args.app_key,
+                            app_secret=args.app_secret,
+                            cano=args.cano,
+                            acnt_prdt_cd=args.acnt_prdt_cd,
+                            odno=odno,
+                        )
+                        if status in {"filled", "partial"} and filled_qty > 0:
+                            remain = max(0, qty - filled_qty)
+                            if remain <= 0:
+                                clear_position_state(symbol)
+                            else:
+                                positions[symbol] = remain
+                                persist_runtime_state()
+                            notifier.send(f"수동매도체결 {display_name(name, symbol)} {filled_qty}/{max(ord_qty, qty)}주")
+                        else:
+                            notifier.send(f"수동매도미체결 {display_name(name, symbol)} {filled_qty}/{max(ord_qty, qty)}주 | 주문번호:{odno}")
+                    else:
+                        notifier.send(f"수동매도실패 {display_name(name, symbol)} {qty}주 | {format_kis_error(res)}")
+                continue
             if action == "unwatch":
                 for symbol, name in payload:
                     manual_watch_symbols.discard(symbol)
@@ -2484,29 +2667,12 @@ def main() -> None:
                         in_korean_trading_session(now_local, args.market_open_hhmm, args.market_close_hhmm)
                         and not is_daily_trade_finished(now_local.date())
                     ):
-                        try:
-                            prev = fetch_single_previous_day_stat(args.base_url, token, args.app_key, args.app_secret, symbol)
-                            rows = fetch_minute_ohlcv(
-                                base_url=args.base_url,
-                                token=token,
-                                app_key=args.app_key,
-                                app_secret=args.app_secret,
-                                symbol=symbol,
-                                count_hint=raw_count_hint_for_resampled_bars(80, args.bar_minutes),
-                                market_code=args.minute_market_code,
-                            )
-                            bars = resample_bars(rows, bar_minutes=args.bar_minutes)
-                            leader_score, leader_reason = leader_score_from_minute_bars(bars, prev) if bars else (0.0, "manual")
-                            enriched = _candidate_from_bars(symbol, known_name_map.get(symbol, symbol), bars, leader_score, leader_reason)
-                            if enriched is not None:
-                                enriched.theme_id = 99
-                                enriched.theme_name = "수동감시"
-                                for idx, existing in enumerate(watch_candidates):
-                                    if existing.symbol == symbol:
-                                        watch_candidates[idx] = enriched
-                                        break
-                        except Exception as exc:
-                            notifier.send(f"수동감시 즉시추가 실패 | {display_name(name, symbol)} | {type(exc).__name__}")
+                        enriched = refresh_manual_candidate(symbol, name)
+                        if enriched is not None:
+                            for idx, existing in enumerate(watch_candidates):
+                                if existing.symbol == symbol:
+                                    watch_candidates[idx] = enriched
+                                    break
                 if added_names:
                     persist_symbol_name_map()
                     persist_runtime_state()
