@@ -165,6 +165,25 @@ def place_order(
     return r.json()
 
 
+def format_kis_error(res: Dict) -> str:
+    rt_cd = str(res.get("rt_cd", "")).strip()
+    msg_cd = str(res.get("msg_cd", "")).strip()
+    msg1 = str(res.get("msg1", "")).strip()
+    out = res.get("output") or res.get("output1") or {}
+    extra = ""
+    if isinstance(out, dict) and out:
+        keys = ["ODNO", "ORD_TMD", "KRX_FWDG_ORD_ORGNO"]
+        parts = []
+        for k in keys:
+            v = out.get(k)
+            if v:
+                parts.append(f"{k}={v}")
+        if parts:
+            extra = " | " + " ".join(parts)[:120]
+    base = f"rt_cd={rt_cd} msg_cd={msg_cd} msg1={msg1}".strip()
+    return (base + extra).strip()
+
+
 def _to_int(value: str | int | float | None) -> int:
     try:
         if value is None:
@@ -2902,7 +2921,9 @@ def main() -> None:
                                 blocked_unbuyable_symbols.add(c.symbol)
                                 notifier.send(f"제외등록 {display_name(c.name, c.symbol)} | 매수미체결")
                         else:
-                            notifier.send(f"매수실패 {display_name(c.name, c.symbol)} {qty}주 {close:.0f}원 | {buy_tag}")
+                            notifier.send(
+                                f"매수실패 {display_name(c.name, c.symbol)} {qty}주 {close:.0f}원 | {buy_tag} | {format_kis_error(res)}"
+                            )
         if cycle + 1 < args.max_cycles:
             sleep_with_telegram_poll(max(1, int(args.scan_interval_sec)))
 
