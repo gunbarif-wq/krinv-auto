@@ -1750,6 +1750,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--sync-holdings", action=argparse.BooleanOptionalAction, default=True, help="sync account holdings to monitor manual buys")
     p.add_argument("--holdings-sync-interval-sec", type=int, default=30, help="how often to sync account holdings")
     p.add_argument("--theme-count", type=int, default=2, help="number of theme groups to keep")
+    p.add_argument("--notify-theme-progress", action=argparse.BooleanOptionalAction, default=False, help="send verbose theme-selection progress messages")
     p.add_argument("--disable-leader-only", action="store_true", default=False, help="allow non-leader selected symbols too")
     p.add_argument("--leader-max-symbols", type=int, default=1, help="number of theme leaders to keep when leader-only is enabled")
     p.add_argument("--disable-prev-day-score", action="store_true", default=False, help="do not add previous-day strength to leader scoring")
@@ -2658,6 +2659,11 @@ def main() -> None:
                         sleep_with_telegram_poll(max(1, int(args.scan_interval_sec)))
                     continue
                 try:
+                    progress_cb = None
+                    if bool(args.notify_theme_progress):
+                        progress_cb = lambda done, total, selected_cnt, cur: notifier.send(
+                            f"테마진행 {done}/{total} | 분석 {selected_cnt} | {cur}"
+                        )
                     leaders, theme_groups = select_theme_leaders(
                         base_url=args.base_url,
                         token=token,
@@ -2668,7 +2674,7 @@ def main() -> None:
                         minute_market_code=args.minute_market_code,
                         prev_day_stats=prev_stats_map,
                         theme_count=int(args.theme_count),
-                        progress_cb=lambda done, total, selected_cnt, cur: notifier.send(f"테마진행 {done}/{total} | 분석 {selected_cnt} | {cur}"),
+                        progress_cb=progress_cb,
                     )
                 except Exception as e:
                     if is_network_block_error(e):
