@@ -3,3 +3,4 @@ catboost>=1.2
 scikit-learn>=1.4
 pykrx>=1.0.48
 pandas>=2.0
+Pillow>=10.0
