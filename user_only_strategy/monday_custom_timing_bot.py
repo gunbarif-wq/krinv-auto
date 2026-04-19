@@ -4,6 +4,7 @@ import argparse
 import html
 import json
 import os
+import pickle
 import re
 import subprocess
 import sys
@@ -896,6 +897,86 @@ class ThemeGroup:
     leader_symbol: str
     leader_name: str
     members: List[Candidate]
+
+
+def load_chart_classifier_payload(model_path_text: str) -> Dict[str, object] | None:
+    model_path = Path(str(model_path_text).strip()) if model_path_text else None
+    if not model_path:
+        return None
+    if not model_path.is_absolute():
+        model_path = (ROOT / model_path).resolve()
+    if not model_path.exists():
+        return None
+    try:
+        with model_path.open("rb") as f:
+            payload = pickle.load(f)
+        if not isinstance(payload, dict) or "model" not in payload:
+            return None
+        payload["model_path"] = str(model_path)
+        return payload
+    except Exception:
+        return None
+
+
+def score_chart_classifier_bonus(
+    rows: List[Dict[str, float]],
+    payload: Dict[str, object] | None,
+    *,
+    symbol: str,
+    cache_dir: Path,
+    threshold: float,
+    bonus_scale: float,
+    bar_minutes: int,
+) -> Tuple[float, float, str]:
+    if not payload or len(rows) < 40:
+        return 0.0, 0.0, "차트점수=off"
+    try:
+        from PIL import Image
+        from user_only_strategy.build_chart_image_dataset import render_chart_png
+    except Exception as e:
+        return 0.0, 0.0, f"차트점수=import_fail({type(e).__name__})"
+
+    model = payload.get("model")
+    image_size = int(payload.get("image_size", 96))
+    window = rows[-40:]
+    chart_rows = [
+        {
+            "date": _parse_bar_datetime(float(r["date"])).strftime("%Y-%m-%d %H:%M:%S"),
+            "open": f"{float(r['open']):.6f}",
+            "high": f"{float(r['high']):.6f}",
+            "low": f"{float(r['low']):.6f}",
+            "close": f"{float(r['close']):.6f}",
+            "volume": f"{float(r.get('volume', 0.0)):.0f}",
+        }
+        for r in window
+    ]
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    image_path = cache_dir / f"{symbol}_{bar_minutes}m_latest.png"
+    try:
+        render_chart_png(chart_rows, image_path, 640, 640)
+        img = Image.open(image_path).convert("L").resize((image_size, image_size))
+        x = np.asarray(img, dtype=np.float32).reshape(1, -1) / 255.0
+        prob = 0.0
+        if hasattr(model, "predict_proba"):
+            proba = model.predict_proba(x)[0]
+            classes = getattr(model, "classes_", [])
+            if len(classes) >= 2:
+                try:
+                    pos_idx = list(classes).index(1)
+                    prob = float(proba[pos_idx])
+                except Exception:
+                    prob = float(proba[-1])
+            elif len(proba) > 0:
+                prob = float(proba[-1])
+        else:
+            pred = model.predict(x)[0]
+            prob = 1.0 if int(pred) == 1 else 0.0
+        thr = min(0.95, max(0.05, float(threshold)))
+        scale = max(0.0, float(bonus_scale))
+        bonus = max(0.0, (prob - thr) / max(1e-6, 1.0 - thr)) * scale
+        return prob, bonus, f"차트점수={prob:.2f} 보너스={bonus:.1f}"
+    except Exception as e:
+        return 0.0, 0.0, f"차트점수=fail({type(e).__name__})"
 
 
 def _parse_bar_datetime(v: float) -> datetime:
@@ -1851,6 +1932,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--extra-symbols-file", default=os.getenv("NEXT_MARKET_SYMBOLS_FILE", ""), help="extra symbols file path")
     p.add_argument("--symbol-name-file", default=os.getenv("KRX_SYMBOL_NAME_FILE", DEFAULT_SYMBOL_NAME_FILE))
     p.add_argument("--watch-state-file", default=os.getenv("WATCH_STATE_FILE", DEFAULT_WATCH_STATE_FILE))
+    p.add_argument("--chart-classifier-model", default=os.getenv("CHART_CLASSIFIER_MODEL", ""), help="optional image classifier pickle path")
+    p.add_argument("--chart-classifier-threshold", type=float, default=float(os.getenv("CHART_CLASSIFIER_THRESHOLD", "0.55")))
+    p.add_argument("--chart-classifier-bonus-scale", type=float, default=float(os.getenv("CHART_CLASSIFIER_BONUS_SCALE", "25.0")))
     return p.parse_args()
 
 
@@ -2185,6 +2269,10 @@ def main() -> None:
         args.telegram_chat_id,
         message_prefix="",
     )
+    chart_classifier_payload = load_chart_classifier_payload(args.chart_classifier_model)
+    chart_classifier_cache_dir = ROOT / "logs" / "chart_classifier_cache"
+    if chart_classifier_payload:
+        notifier.send("차트분류기 로드완료")
     extra_symbols = parse_symbol_csv(args.extra_symbols)
     if args.extra_symbols_file:
         extra_symbols.extend(read_symbols_file(args.extra_symbols_file))
@@ -3015,6 +3103,18 @@ def main() -> None:
                 if c.theme_id > 0 and c.theme_name != "수동감시":
                     chosen_score += leader_bonus
                     chosen_tag = f"{chosen_tag} | 대장보너스={leader_bonus:.1f}"
+                chart_prob, chart_bonus, chart_reason = score_chart_classifier_bonus(
+                    rows,
+                    chart_classifier_payload,
+                    symbol=c.symbol,
+                    cache_dir=chart_classifier_cache_dir,
+                    threshold=float(args.chart_classifier_threshold),
+                    bonus_scale=float(args.chart_classifier_bonus_scale),
+                    bar_minutes=int(args.bar_minutes),
+                )
+                if chart_bonus > 0:
+                    chosen_score += chart_bonus
+                chosen_tag = f"{chosen_tag} | {chart_reason}"
                 signal_at = signal_first_seen_at.setdefault(c.symbol, now)
                 signaled_this_cycle.add(c.symbol)
                 buy_candidates.append((signal_at, chosen_score, c, float(close), chosen_tag))
