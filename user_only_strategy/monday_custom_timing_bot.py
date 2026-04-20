@@ -2900,20 +2900,14 @@ def main() -> None:
             if action == "watch":
                 added_names: List[str] = []
                 for symbol, name in payload:
-                    manual_watch_symbols.add(symbol)
                     known_name_map[symbol] = name if name else symbol
-                    added_names.append(display_name(name, symbol))
                     if all(candidate.symbol != symbol for candidate in watch_candidates):
                         if len(watch_candidates) >= max(1, int(args.max_watch_candidates)):
-                            replaced = False
-                            for idx, existing in enumerate(watch_candidates):
-                                if existing.symbol not in manual_watch_symbols and positions.get(existing.symbol, 0) <= 0:
-                                    watch_candidates.pop(idx)
-                                    replaced = True
-                                    break
-                            if not replaced:
-                                notifier.send(f"대기등록 | 자리나면 자동편입 ({int(args.max_watch_candidates)}개 사용중)")
-                                continue
+                            notifier.send(f"모니터링가득참 | 최대 {int(args.max_watch_candidates)}개")
+                            continue
+                    manual_watch_symbols.add(symbol)
+                    added_names.append(display_name(name, symbol))
+                    if all(candidate.symbol != symbol for candidate in watch_candidates):
                         # Keep manual symbols in watch list even off-session, so user can verify immediately.
                         candidate = Candidate(
                             symbol=symbol,
@@ -3517,6 +3511,19 @@ def main() -> None:
                                     time.sleep(wait_sec)
                                     continue
                                 raise
+                            remaining_qty = confirm_holding_qty(
+                                base_url=args.base_url,
+                                token=token,
+                                app_key=args.app_key,
+                                app_secret=args.app_secret,
+                                cano=args.cano,
+                                acnt_prdt_cd=args.acnt_prdt_cd,
+                                symbol=c.symbol,
+                            )
+                            if remaining_qty > 0:
+                                status = "filled" if remaining_qty >= qty else "partial"
+                                filled_qty = max(filled_qty, remaining_qty)
+                                ord_qty = max(ord_qty, qty)
                             if status == "filled":
                                 notifier.send(f"매수체결 {display_name(c.name, c.symbol)} {filled_qty}주 | 주문번호:{odno} | {buy_tag}")
                                 set_position_entry(c.symbol, filled_qty, float(close))
@@ -3526,8 +3533,8 @@ def main() -> None:
                                     set_position_entry(c.symbol, filled_qty, float(close))
                             else:
                                 notifier.send(f"매수미체결 {display_name(c.name, c.symbol)} {filled_qty}/{max(ord_qty, qty)}주 | 주문번호:{odno} | {buy_tag}")
-                                blocked_unbuyable_symbols.add(c.symbol)
-                                notifier.send(f"제외등록 {display_name(c.name, c.symbol)} | 매수미체결")
+                                order_cooldown_until[c.symbol] = now + timedelta(seconds=30)
+                                notifier.send(f"재시도대기 {display_name(c.name, c.symbol)} | 30초 후 재확인")
                         else:
                             if is_rate_limited_error(res):
                                 order_cooldown_until[c.symbol] = now + timedelta(seconds=15)
