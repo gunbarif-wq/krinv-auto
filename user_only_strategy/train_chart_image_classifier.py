@@ -11,9 +11,12 @@ from typing import List, Tuple
 import numpy as np
 from PIL import Image
 from sklearn.dummy import DummyClassifier
+from sklearn.ensemble import ExtraTreesClassifier, RandomForestClassifier
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import accuracy_score, balanced_accuracy_score
 from sklearn.model_selection import train_test_split
+from sklearn.pipeline import Pipeline
+from sklearn.decomposition import PCA
 
 
 def parse_args() -> argparse.Namespace:
@@ -79,15 +82,76 @@ def main() -> None:
             random_state=args.random_state,
             stratify=y,
         )
-        model = LogisticRegression(max_iter=1000, class_weight="balanced", random_state=args.random_state)
-        model.fit(x_train, y_train)
-        y_pred = model.predict(x_test)
+        pca_dim = max(8, min(64, x_train.shape[0] - 1, x_train.shape[1]))
+        candidates = {
+            "logistic_raw": LogisticRegression(max_iter=2000, class_weight="balanced", random_state=args.random_state),
+            "pca_logistic": Pipeline(
+                [
+                    ("pca", PCA(n_components=pca_dim, random_state=args.random_state)),
+                    ("clf", LogisticRegression(max_iter=2000, class_weight="balanced", random_state=args.random_state)),
+                ]
+            ),
+            "pca_rf": Pipeline(
+                [
+                    ("pca", PCA(n_components=pca_dim, random_state=args.random_state)),
+                    (
+                        "clf",
+                        RandomForestClassifier(
+                            n_estimators=300,
+                            random_state=args.random_state,
+                            class_weight="balanced_subsample",
+                            n_jobs=1,
+                        ),
+                    ),
+                ]
+            ),
+            "pca_et": Pipeline(
+                [
+                    ("pca", PCA(n_components=pca_dim, random_state=args.random_state)),
+                    (
+                        "clf",
+                        ExtraTreesClassifier(
+                            n_estimators=400,
+                            random_state=args.random_state,
+                            class_weight="balanced",
+                            n_jobs=1,
+                        ),
+                    ),
+                ]
+            ),
+        }
+        best_name = ""
+        best_model = None
+        best_metrics = None
+        comparison = {}
+        for name, candidate in candidates.items():
+            candidate.fit(x_train, y_train)
+            y_pred = candidate.predict(x_test)
+            cand_metrics = {
+                "accuracy": float(accuracy_score(y_test, y_pred)),
+                "balanced_accuracy": float(balanced_accuracy_score(y_test, y_pred)),
+            }
+            comparison[name] = cand_metrics
+            if (
+                best_metrics is None
+                or cand_metrics["balanced_accuracy"] > best_metrics["balanced_accuracy"]
+                or (
+                    cand_metrics["balanced_accuracy"] == best_metrics["balanced_accuracy"]
+                    and cand_metrics["accuracy"] > best_metrics["accuracy"]
+                )
+            ):
+                best_name = name
+                best_model = candidate
+                best_metrics = cand_metrics
+        model = best_model
         metrics = {
-            "mode": "logistic_regression",
+            "mode": str(best_name),
             "train_samples": int(len(y_train)),
             "test_samples": int(len(y_test)),
-            "accuracy": float(accuracy_score(y_test, y_pred)),
-            "balanced_accuracy": float(balanced_accuracy_score(y_test, y_pred)),
+            "accuracy": float(best_metrics["accuracy"]),
+            "balanced_accuracy": float(best_metrics["balanced_accuracy"]),
+            "model_comparison": comparison,
+            "pca_dim": int(pca_dim),
         }
     else:
         model = DummyClassifier(strategy="most_frequent")

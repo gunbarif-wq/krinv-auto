@@ -35,6 +35,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--limit", type=int, default=0, help="max images (0 = all)")
     p.add_argument("--horizon-bars", type=int, default=15)
     p.add_argument("--label-mode", default="fixed", choices=["fixed", "atr", "bearish2"])
+    p.add_argument("--target-side", default="long", choices=["long", "short"])
     p.add_argument("--up-threshold", type=float, default=0.025)
     p.add_argument("--down-threshold", type=float, default=0.012)
     p.add_argument("--atr-up-mult", type=float, default=2.5)
@@ -309,6 +310,7 @@ def build_label_map(args: argparse.Namespace, rows: List[Dict[str, str]]) -> Dic
         atr_up_mult=args.atr_up_mult,
         atr_down_mult=args.atr_down_mult,
         atr_floor_pct=args.atr_floor_pct,
+        target_side=getattr(args, "target_side", "long"),
     )
     return {str(row["date"]): row for row in labeled_rows}
 
@@ -390,6 +392,7 @@ def main() -> None:
         "stride": args.stride,
         "generated_images": generated,
         "label_mode": args.label_mode,
+        "target_side": args.target_side,
         "out_dir": str(out_dir),
     }
     (out_dir / "summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")

@@ -1001,6 +1001,16 @@ def load_chart_classifier_payload(model_path_text: str) -> Dict[str, object] | N
         return None
 
 
+def resolve_chart_model_path(primary_text: str, fallback_relpath: str) -> str:
+    text = str(primary_text or "").strip()
+    if text:
+        return text
+    fallback = (ROOT / fallback_relpath).resolve()
+    if fallback.exists():
+        return str(fallback)
+    return ""
+
+
 def score_chart_classifier_bonus(
     rows: List[Dict[str, float]],
     payload: Dict[str, object] | None,
@@ -1060,6 +1070,22 @@ def score_chart_classifier_bonus(
         return prob, bonus, f"차트점수={prob:.2f} 보너스={bonus:.1f}"
     except Exception as e:
         return 0.0, 0.0, f"차트점수=fail({type(e).__name__})"
+
+
+def resolve_intraday_chart_threshold(
+    hhmm: int,
+    *,
+    base_threshold: float,
+    morning_threshold: float,
+    afternoon_threshold: float,
+    morning_end_hhmm: int,
+    afternoon_start_hhmm: int,
+) -> float:
+    if hhmm <= int(morning_end_hhmm):
+        return float(morning_threshold)
+    if hhmm >= int(afternoon_start_hhmm):
+        return float(afternoon_threshold)
+    return float(base_threshold)
 
 
 def _parse_bar_datetime(v: float) -> datetime:
@@ -2015,9 +2041,17 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--extra-symbols-file", default=os.getenv("NEXT_MARKET_SYMBOLS_FILE", ""), help="extra symbols file path")
     p.add_argument("--symbol-name-file", default=os.getenv("KRX_SYMBOL_NAME_FILE", DEFAULT_SYMBOL_NAME_FILE))
     p.add_argument("--watch-state-file", default=os.getenv("WATCH_STATE_FILE", DEFAULT_WATCH_STATE_FILE))
-    p.add_argument("--chart-classifier-model", default=os.getenv("CHART_CLASSIFIER_MODEL", ""), help="optional image classifier pickle path")
+    p.add_argument("--chart-classifier-model", default=os.getenv("CHART_CLASSIFIER_MODEL", ""), help="optional buy image classifier pickle path")
     p.add_argument("--chart-classifier-threshold", type=float, default=float(os.getenv("CHART_CLASSIFIER_THRESHOLD", "0.50")))
+    p.add_argument("--chart-classifier-threshold-morning", type=float, default=float(os.getenv("CHART_CLASSIFIER_THRESHOLD_MORNING", os.getenv("CHART_CLASSIFIER_THRESHOLD", "0.50"))))
+    p.add_argument("--chart-classifier-threshold-afternoon", type=float, default=float(os.getenv("CHART_CLASSIFIER_THRESHOLD_AFTERNOON", str(min(0.95, float(os.getenv('CHART_CLASSIFIER_THRESHOLD', '0.50')) + 0.04)))))
     p.add_argument("--chart-classifier-bonus-scale", type=float, default=float(os.getenv("CHART_CLASSIFIER_BONUS_SCALE", "45.0")))
+    p.add_argument("--sell-chart-classifier-model", default=os.getenv("SELL_CHART_CLASSIFIER_MODEL", ""), help="optional sell image classifier pickle path")
+    p.add_argument("--sell-chart-classifier-threshold", type=float, default=float(os.getenv("SELL_CHART_CLASSIFIER_THRESHOLD", "0.55")))
+    p.add_argument("--sell-chart-classifier-threshold-morning", type=float, default=float(os.getenv("SELL_CHART_CLASSIFIER_THRESHOLD_MORNING", os.getenv("SELL_CHART_CLASSIFIER_THRESHOLD", "0.55"))))
+    p.add_argument("--sell-chart-classifier-threshold-afternoon", type=float, default=float(os.getenv("SELL_CHART_CLASSIFIER_THRESHOLD_AFTERNOON", str(max(0.05, float(os.getenv('SELL_CHART_CLASSIFIER_THRESHOLD', '0.55')) - 0.03)))))
+    p.add_argument("--chart-threshold-morning-end-hhmm", type=int, default=int(os.getenv("CHART_THRESHOLD_MORNING_END_HHMM", "1030")))
+    p.add_argument("--chart-threshold-afternoon-start-hhmm", type=int, default=int(os.getenv("CHART_THRESHOLD_AFTERNOON_START_HHMM", "1300")))
     return p.parse_args()
 
 
@@ -2382,10 +2416,22 @@ def main() -> None:
         args.telegram_chat_id,
         message_prefix="",
     )
-    chart_classifier_payload = load_chart_classifier_payload(args.chart_classifier_model)
-    chart_classifier_cache_dir = ROOT / "logs" / "chart_classifier_cache"
+    buy_chart_model_path = resolve_chart_model_path(
+        args.chart_classifier_model,
+        "data/chart_models/live50_30d_final.pkl",
+    )
+    sell_chart_model_path = resolve_chart_model_path(
+        args.sell_chart_classifier_model,
+        "data/chart_models/live50_30d_sell_final.pkl",
+    )
+    chart_classifier_payload = load_chart_classifier_payload(buy_chart_model_path)
+    sell_chart_classifier_payload = load_chart_classifier_payload(sell_chart_model_path)
+    chart_classifier_cache_dir = ROOT / "logs" / "chart_classifier_cache_buy"
+    sell_chart_classifier_cache_dir = ROOT / "logs" / "chart_classifier_cache_sell"
     if chart_classifier_payload:
-        notifier.send("차트분류기 로드완료")
+        notifier.send("매수차트분류기 로드완료")
+    if sell_chart_classifier_payload:
+        notifier.send("매도차트분류기 로드완료")
     extra_symbols = parse_symbol_csv(args.extra_symbols)
     if args.extra_symbols_file:
         extra_symbols.extend(read_symbols_file(args.extra_symbols_file))
@@ -3292,12 +3338,20 @@ def main() -> None:
                 if c.theme_id > 0 and c.theme_name != "수동감시":
                     chosen_score += leader_bonus
                     chosen_tag = f"{chosen_tag} | 대장보너스={leader_bonus:.1f}"
+                chart_buy_threshold = resolve_intraday_chart_threshold(
+                    now.hour * 100 + now.minute,
+                    base_threshold=float(args.chart_classifier_threshold),
+                    morning_threshold=float(args.chart_classifier_threshold_morning),
+                    afternoon_threshold=float(args.chart_classifier_threshold_afternoon),
+                    morning_end_hhmm=int(args.chart_threshold_morning_end_hhmm),
+                    afternoon_start_hhmm=int(args.chart_threshold_afternoon_start_hhmm),
+                )
                 chart_prob, chart_bonus, chart_reason = score_chart_classifier_bonus(
                     rows,
                     chart_classifier_payload,
                     symbol=c.symbol,
                     cache_dir=chart_classifier_cache_dir,
-                    threshold=float(args.chart_classifier_threshold),
+                    threshold=chart_buy_threshold,
                     bonus_scale=float(args.chart_classifier_bonus_scale),
                     bar_minutes=int(args.bar_minutes),
                 )
@@ -3347,10 +3401,34 @@ def main() -> None:
                     hold_time_ok = int(args.sell_max_hold_min) > 0 and hold_min >= int(args.sell_max_hold_min)
                 if profit_pct >= 0.015 and not stop_loss_ok and not trailing_ok:
                     hold_time_ok = False
-                final_sell_ok = bool(sell_ok or stop_loss_ok or trailing_ok or hold_time_ok)
+                chart_sell_threshold = resolve_intraday_chart_threshold(
+                    now.hour * 100 + now.minute,
+                    base_threshold=float(args.sell_chart_classifier_threshold),
+                    morning_threshold=float(args.sell_chart_classifier_threshold_morning),
+                    afternoon_threshold=float(args.sell_chart_classifier_threshold_afternoon),
+                    morning_end_hhmm=int(args.chart_threshold_morning_end_hhmm),
+                    afternoon_start_hhmm=int(args.chart_threshold_afternoon_start_hhmm),
+                )
+                chart_sell_prob, _chart_sell_bonus, chart_sell_reason = score_chart_classifier_bonus(
+                    rows,
+                    sell_chart_classifier_payload,
+                    symbol=c.symbol,
+                    cache_dir=sell_chart_classifier_cache_dir,
+                    threshold=chart_sell_threshold,
+                    bonus_scale=10.0,
+                    bar_minutes=int(args.bar_minutes),
+                )
+                chart_sell_ok = bool(
+                    sell_chart_classifier_payload
+                    and chart_sell_prob >= chart_sell_threshold
+                    and (profit_pct >= 0.003 or stop_loss_ok or trailing_ok or hold_time_ok)
+                )
+                final_sell_ok = bool(sell_ok or stop_loss_ok or trailing_ok or hold_time_ok or chart_sell_ok)
                 reason_parts: List[str] = []
                 if sell_ok:
                     reason_parts.append(f"지표:{sell_reason}")
+                if chart_sell_ok:
+                    reason_parts.append(f"차트:{chart_sell_reason}")
                 if stop_loss_ok:
                     reason_parts.append(f"손절(entry={ep:.0f},close={float(close):.0f})")
                 if trailing_ok:

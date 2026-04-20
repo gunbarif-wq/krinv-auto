@@ -9,6 +9,9 @@ from collections import Counter
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, List, Tuple
+import time
+
+import requests
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -38,17 +41,19 @@ ETF_KEYWORDS = (
 
 
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Fetch 50 symbols, build chart-image dataset, and retrain classifier")
+    p = argparse.ArgumentParser(description="Fetch live candidate symbols, build chart-image dataset, and retrain classifier")
     p.add_argument("--base-url", default=os.getenv("KIS_BASE_URL", "https://openapivts.koreainvestment.com:29443"))
+    p.add_argument("--quote-base-url", default=os.getenv("KIS_QUOTE_BASE_URL", "https://openapi.koreainvestment.com:9443"))
     p.add_argument("--app-key", default=os.getenv("KIS_APP_KEY", ""))
     p.add_argument("--app-secret", default=os.getenv("KIS_APP_SECRET", ""))
     p.add_argument("--symbols", type=int, default=50, help="number of candidate symbols to select")
-    p.add_argument("--fetch-days", type=int, default=7, help="business days of minute data per symbol")
+    p.add_argument("--fetch-days", type=int, default=30, help="business days of minute data per symbol")
     p.add_argument("--bar-minutes", type=int, default=3, choices=[1, 3, 5])
     p.add_argument("--window-bars", type=int, default=40)
     p.add_argument("--stride", type=int, default=8)
     p.add_argument("--limit-per-symbol", type=int, default=60)
     p.add_argument("--label-mode", default="fixed", choices=["fixed", "atr", "bearish2"])
+    p.add_argument("--target-side", default="long", choices=["long", "short"])
     p.add_argument("--up-threshold", type=float, default=0.015)
     p.add_argument("--down-threshold", type=float, default=0.01)
     p.add_argument("--horizon-bars", type=int, default=15)
@@ -57,7 +62,87 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--pause-ms", type=int, default=380)
     p.add_argument("--max-bars-per-day", type=int, default=450)
     p.add_argument("--skip-etf", action=argparse.BooleanOptionalAction, default=True)
+    p.add_argument("--fetch-only", action="store_true", help="only fetch raw minute data and summary, skip image build/train")
     return p.parse_args()
+
+
+def fetch_one_day_1m_10230(
+    app_key: str,
+    app_secret: str,
+    token: str,
+    symbol: str,
+    yyyymmdd: str,
+    pause_ms: int,
+    max_rows: int,
+    base_url: str,
+    market_code: str = "J",
+) -> List[Dict[str, str]]:
+    if "openapivts" in str(base_url).lower():
+        raise RuntimeError("10230 historical minute API is not supported on mock(VTS) domain")
+
+    url = f"{base_url}/uapi/domestic-stock/v1/quotations/inquire-time-dailychartprice"
+    out: Dict[str, Dict[str, str]] = {}
+    cursor_time = "153000"
+    last_cursor = ""
+    req_count = 0
+
+    while len(out) < max_rows:
+        headers = {
+            "content-type": "application/json; charset=utf-8",
+            "authorization": f"Bearer {token}",
+            "appkey": app_key,
+            "appsecret": app_secret,
+            "tr_id": "FHKST03010230",
+            "custtype": "P",
+        }
+        params = {
+            "FID_COND_MRKT_DIV_CODE": market_code,
+            "FID_INPUT_ISCD": symbol,
+            "FID_INPUT_HOUR_1": cursor_time,
+            "FID_INPUT_DATE_1": yyyymmdd,
+            "FID_PW_DATA_INCU_YN": "Y",
+            "FID_FAKE_TICK_INCU_YN": "",
+        }
+        resp = requests.get(url, headers=headers, params=params, timeout=20)
+        resp.raise_for_status()
+        data = resp.json()
+        if str(data.get("rt_cd")) != "0":
+            raise RuntimeError(f"rt_cd={data.get('rt_cd')} msg1={data.get('msg1')}")
+
+        rows = data.get("output2", []) or []
+        if not rows:
+            break
+
+        min_time = None
+        for row in rows:
+            d = str(row.get("stck_bsop_date", "")).strip()
+            t = str(row.get("stck_cntg_hour", "")).strip()
+            if len(t) != 6 or len(d) != 8:
+                continue
+            if min_time is None or t < min_time:
+                min_time = t
+            dt = f"{d[:4]}-{d[4:6]}-{d[6:8]} {t[:2]}:{t[2:4]}:{t[4:6]}"
+            out[dt] = {
+                "date": dt,
+                "open": str(row.get("stck_oprc", "0")),
+                "high": str(row.get("stck_hgpr", "0")),
+                "low": str(row.get("stck_lwpr", "0")),
+                "close": str(row.get("stck_prpr", "0")),
+                "volume": str(row.get("cntg_vol", "0")),
+            }
+
+        req_count += 1
+        if len(out) >= max_rows or not min_time:
+            break
+        if min_time == last_cursor or min_time >= cursor_time:
+            break
+        last_cursor = cursor_time
+        cursor_time = min_time
+        if cursor_time <= "090000" or req_count > 20:
+            break
+        time.sleep(max(0, pause_ms) / 1000.0)
+
+    return [out[k] for k in sorted(out.keys())]
 
 
 def should_skip_name(name: str) -> bool:
@@ -87,6 +172,18 @@ def write_csv(path: Path, rows: List[Dict[str, str]]) -> None:
         w.writerows(rows)
 
 
+def csv_unique_days(path: Path) -> int:
+    if not path.exists():
+        return 0
+    days = set()
+    with path.open("r", encoding="utf-8") as f:
+        for row in csv.DictReader(f):
+            dt = str(row.get("date", "")).strip()
+            if len(dt) >= 10:
+                days.add(dt[:10])
+    return len(days)
+
+
 def build_symbol_dataset(
     rows_1m: List[Dict[str, str]],
     symbol: str,
@@ -97,6 +194,7 @@ def build_symbol_dataset(
     stride: int,
     limit: int,
     label_mode: str,
+    target_side: str,
     up_threshold: float,
     down_threshold: float,
     horizon_bars: int,
@@ -107,6 +205,7 @@ def build_symbol_dataset(
             horizon_bars=horizon_bars,
             min_history_bars=20,
             label_mode=label_mode,
+            target_side=target_side,
             up_threshold=up_threshold,
             down_threshold=down_threshold,
             atr_up_mult=2.5,
@@ -189,9 +288,10 @@ def main() -> None:
     if not args.app_key or not args.app_secret:
         raise RuntimeError("KIS_APP_KEY / KIS_APP_SECRET required")
 
-    token = get_access_token(args.app_key, args.app_secret, base_url=args.base_url)
+    quote_base_url = str(args.quote_base_url or args.base_url).strip()
+    token = get_access_token(args.app_key, args.app_secret, base_url=quote_base_url)
     universe = fetch_candidate_universe(
-        args.base_url,
+        quote_base_url,
         token,
         args.app_key,
         args.app_secret,
@@ -225,6 +325,11 @@ def main() -> None:
 
     business_days = iter_business_days(start_ymd, end_ymd)
     for idx, (symbol, name) in enumerate(picked, start=1):
+        raw_csv = raw_root / f"{symbol}_1m.csv"
+        if args.fetch_only and csv_unique_days(raw_csv) >= max(1, int(args.fetch_days) - 1):
+            summary["per_symbol"][symbol] = {"name": name, "rows_1m": -1, "images": 0, "label0": 0, "label1": 0, "skipped_existing": True}
+            print(f"[{idx}/{len(picked)}] {symbol} {name} skip_existing")
+            continue
         all_rows: List[Dict[str, str]] = []
         for d in business_days:
             ymd = d.strftime("%Y%m%d")
@@ -237,8 +342,19 @@ def main() -> None:
                     yyyymmdd=ymd,
                     max_bars_per_day=int(args.max_bars_per_day),
                     pause_ms=int(args.pause_ms),
-                    base_url=args.base_url,
+                    base_url=quote_base_url,
                 )
+                if not day_rows and int(args.fetch_days) > 1:
+                    day_rows = fetch_one_day_1m_10230(
+                        app_key=args.app_key,
+                        app_secret=args.app_secret,
+                        token=token,
+                        symbol=symbol,
+                        yyyymmdd=ymd,
+                        pause_ms=int(args.pause_ms),
+                        max_rows=int(args.max_bars_per_day),
+                        base_url=quote_base_url,
+                    )
                 if day_rows:
                     all_rows.extend(day_rows)
             except Exception:
@@ -248,8 +364,11 @@ def main() -> None:
         if not rows_1m:
             summary["per_symbol"][symbol] = {"name": name, "rows_1m": 0, "images": 0, "label0": 0, "label1": 0}
             continue
-        raw_csv = raw_root / f"{symbol}_1m.csv"
         write_csv(raw_csv, rows_1m)
+        if args.fetch_only:
+            summary["per_symbol"][symbol] = {"name": name, "rows_1m": len(rows_1m), "images": 0, "label0": 0, "label1": 0}
+            print(f"[{idx}/{len(picked)}] {symbol} {name} rows={len(rows_1m)} fetched_only")
+            continue
         symbol_out = per_symbol_root / symbol
         stats = build_symbol_dataset(
             rows_1m,
@@ -260,6 +379,7 @@ def main() -> None:
             stride=int(args.stride),
             limit=int(args.limit_per_symbol),
             label_mode=str(args.label_mode),
+            target_side=str(args.target_side),
             up_threshold=float(args.up_threshold),
             down_threshold=float(args.down_threshold),
             horizon_bars=int(args.horizon_bars),
@@ -269,12 +389,18 @@ def main() -> None:
         summary["per_symbol"][symbol] = stats
         print(f"[{idx}/{len(picked)}] {symbol} {name} rows={len(rows_1m)} images={stats['images']} pos={stats['label1']}")
 
-    combined_stats = combine_metadata(per_symbol_root, combined_dir)
+    combined_stats = {"rows": 0, "label0": 0, "label1": 0}
+    if not args.fetch_only:
+        combined_stats = combine_metadata(per_symbol_root, combined_dir)
     summary["combined"] = combined_stats
     summary["model_out"] = str(model_out)
     summary["report_out"] = str(report_out)
     out_root.mkdir(parents=True, exist_ok=True)
     (out_root / "summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    if args.fetch_only:
+        print(json.dumps({"run_name": run_name, "combined": combined_stats, "fetch_only": True, "out_root": str(out_root)}, ensure_ascii=False))
+        return
 
     old_argv = sys.argv[:]
     try:

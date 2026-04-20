@@ -274,6 +274,7 @@ def build_rows(
     atr_up_mult: float,
     atr_down_mult: float,
     atr_floor_pct: float,
+    target_side: str = "long",
 ) -> List[Dict[str, str]]:
     dates = data["date"]  # type: ignore[assignment]
     o = data["open"]  # type: ignore[assignment]
@@ -498,7 +499,10 @@ def build_rows(
         down_hits = np.where(fut_l <= down_level)[0]
         up_idx = int(up_hits[0]) if up_hits.size else None
         down_idx = int(down_hits[0]) if down_hits.size else None
-        label = 1 if (up_idx is not None and (down_idx is None or up_idx < down_idx)) else 0
+        if str(target_side).lower() == "short":
+            label = 1 if (down_idx is not None and (up_idx is None or down_idx < up_idx)) else 0
+        else:
+            label = 1 if (up_idx is not None and (down_idx is None or up_idx < down_idx)) else 0
         fwd_close_ret = c[i + horizon] / entry - 1.0
 
         row = {
