@@ -1001,6 +1001,27 @@ def load_chart_classifier_payload(model_path_text: str) -> Dict[str, object] | N
         return None
 
 
+def inspect_chart_classifier_payload(model_path_text: str) -> Tuple[Dict[str, object] | None, str]:
+    model_path = Path(str(model_path_text).strip()) if model_path_text else None
+    if not model_path:
+        return None, "모델경로없음"
+    if not model_path.is_absolute():
+        model_path = (ROOT / model_path).resolve()
+    if not model_path.exists():
+        return None, f"모델파일없음 | {model_path}"
+    try:
+        with model_path.open("rb") as f:
+            payload = pickle.load(f)
+        if not isinstance(payload, dict):
+            return None, f"모델형식오류 | {model_path}"
+        if "model" not in payload:
+            return None, f"모델키없음 | {model_path}"
+        payload["model_path"] = str(model_path)
+        return payload, f"로드완료 | {model_path}"
+    except Exception as exc:
+        return None, f"로드실패 {type(exc).__name__} | {model_path}"
+
+
 def resolve_chart_model_path(primary_text: str, fallback_relpath: str) -> str:
     text = str(primary_text or "").strip()
     if text:
@@ -2426,14 +2447,18 @@ def main() -> None:
         args.sell_chart_classifier_model,
         "data/chart_models/live50_30d_sell_final.pkl",
     )
-    chart_classifier_payload = load_chart_classifier_payload(buy_chart_model_path)
-    sell_chart_classifier_payload = load_chart_classifier_payload(sell_chart_model_path)
+    chart_classifier_payload, buy_chart_model_status = inspect_chart_classifier_payload(buy_chart_model_path)
+    sell_chart_classifier_payload, sell_chart_model_status = inspect_chart_classifier_payload(sell_chart_model_path)
     chart_classifier_cache_dir = ROOT / "logs" / "chart_classifier_cache_buy"
     sell_chart_classifier_cache_dir = ROOT / "logs" / "chart_classifier_cache_sell"
     if chart_classifier_payload:
-        notifier.send("매수차트분류기 로드완료")
+        notifier.send(f"매수차트분류기 {buy_chart_model_status}")
+    else:
+        notifier.send(f"매수차트분류기 비활성 | {buy_chart_model_status}")
     if sell_chart_classifier_payload:
-        notifier.send("매도차트분류기 로드완료")
+        notifier.send(f"매도차트분류기 {sell_chart_model_status}")
+    else:
+        notifier.send(f"매도차트분류기 비활성 | {sell_chart_model_status}")
     extra_symbols = parse_symbol_csv(args.extra_symbols)
     if args.extra_symbols_file:
         extra_symbols.extend(read_symbols_file(args.extra_symbols_file))
