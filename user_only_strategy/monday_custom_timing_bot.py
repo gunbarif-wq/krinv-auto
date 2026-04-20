@@ -1468,6 +1468,8 @@ def parse_telegram_watch_command(text: str, known_name_map: Dict[str, str]) -> T
     if not raw:
         return "ignore", []
     monitor_key = re.sub(r"\s+", "", raw)
+    if monitor_key == "종목선정":
+        return "select", []
     if "모니터" in monitor_key:
         return "status", []
     parts = [item.strip() for item in re.split(r"[,\n]+", raw) if item.strip()]
@@ -2458,6 +2460,7 @@ def main() -> None:
     daily_trade_finished_day = None
     telegram_update_offset = 0
     last_telegram_poll_at: datetime | None = None
+    manual_selection_requested = False
     last_slots_full_notice_at: datetime | None = None
     signal_first_seen_at: Dict[str, datetime] = {}
     last_near_buy_notice_at: Dict[str, datetime] = {}
@@ -2751,7 +2754,7 @@ def main() -> None:
         persist_runtime_state()
 
     def poll_telegram_commands(now_local: datetime) -> None:
-        nonlocal telegram_update_offset, last_telegram_poll_at, last_refresh
+        nonlocal telegram_update_offset, last_telegram_poll_at, last_refresh, manual_selection_requested
         if not args.telegram_bot_token or not args.telegram_chat_id:
             return
         if last_telegram_poll_at is not None:
@@ -2780,6 +2783,11 @@ def main() -> None:
                     action, payload = parse_telegram_watch_command(text, known_name_map)
             if action == "ignore":
                 notifier.send(f"미인식입력 | {text}")
+                continue
+            if action == "select":
+                manual_selection_requested = True
+                last_refresh = None
+                notifier.send("종목선정 요청접수")
                 continue
             if action == "status":
                 current_watch = monitoring_preview()
@@ -3079,17 +3087,7 @@ def main() -> None:
         if in_refresh_window(now, args.refresh_start_hhmm, args.refresh_end_hhmm):
             holding_count = sum(1 for q in positions.values() if q > 0)
             slots_left = max(0, int(args.max_positions) - holding_count)
-            need_refresh = last_refresh is None
-            if last_refresh is not None:
-                elapsed = (now - last_refresh).total_seconds() / 60.0
-                if hhmm < int(args.market_open_hhmm):
-                    refresh_interval_min = int(args.premarket_refresh_interval_min)
-                elif theme_selection_day != now.date():
-                    refresh_interval_min = int(args.early_refresh_interval_min)
-                else:
-                    refresh_interval_min = int(args.market_close_hhmm)
-                if elapsed >= max(1, refresh_interval_min):
-                    need_refresh = True
+            need_refresh = bool(manual_selection_requested)
             if last_refresh is None and suppress_initial_refresh_once:
                 # Apply startup-suppress only once.
                 last_refresh = now
@@ -3121,10 +3119,10 @@ def main() -> None:
                 if tracking_active:
                     last_refresh = now
                     need_refresh = False
+                    manual_selection_requested = False
                     notifier.send("재선정대기: 현재 감시 흐름 유지")
                 else:
-                    if args.notify_theme_progress:
-                        notifier.send("후보군선정 시작" if hhmm < int(args.market_open_hhmm) else "종목선정 시작")
+                    notifier.send("후보군선정 시작" if hhmm < int(args.market_open_hhmm) else "종목선정 시작")
             if need_refresh:
                 # Fetch a wider pool first, then fill top N after exclusions.
                 fetch_pool_size = max(int(args.max_universe), int(args.max_universe) * 8)
@@ -3181,6 +3179,7 @@ def main() -> None:
                 if not in_korean_trading_session(now, args.market_open_hhmm, args.market_close_hhmm):
                     notifier.send("대장주판정대기: 08:00 이후 분봉 확인")
                     last_refresh = datetime.now(KST)
+                    manual_selection_requested = False
                     first_run_at_window_open = False
                     suppress_initial_refresh_once = False
                     if cycle + 1 < args.max_cycles:
@@ -3232,6 +3231,7 @@ def main() -> None:
                 if watch_candidates:
                     notifier.send(f"추적 {len(watch_candidates)}개 | {watch_preview(watch_candidates)}")
                 last_refresh = datetime.now(KST)
+                manual_selection_requested = False
                 first_run_at_window_open = False
                 suppress_initial_refresh_once = False
 
