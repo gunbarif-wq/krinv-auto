@@ -326,6 +326,29 @@ def wait_order_fill_status(
     return last_status
 
 
+def confirm_holding_qty(
+    base_url: str,
+    token: str,
+    app_key: str,
+    app_secret: str,
+    cano: str,
+    acnt_prdt_cd: str,
+    symbol: str,
+) -> int:
+    try:
+        holdings = fetch_account_holdings(
+            base_url=base_url,
+            token=token,
+            app_key=app_key,
+            app_secret=app_secret,
+            cano=cano,
+            acnt_prdt_cd=acnt_prdt_cd,
+        )
+    except Exception:
+        return -1
+    return int((holdings.get(symbol) or {}).get("qty", 0))
+
+
 def balance_inquiry_tr_id(base_url: str) -> str:
     return "VTTC8434R" if is_demo_base_url(base_url) else "TTTC8434R"
 
@@ -2833,9 +2856,24 @@ def main() -> None:
                             acnt_prdt_cd=args.acnt_prdt_cd,
                             odno=odno,
                         )
+                        remaining_qty = confirm_holding_qty(
+                            base_url=args.base_url,
+                            token=token,
+                            app_key=args.app_key,
+                            app_secret=args.app_secret,
+                            cano=args.cano,
+                            acnt_prdt_cd=args.acnt_prdt_cd,
+                            symbol=symbol,
+                        )
+                        if remaining_qty == 0:
+                            status = "filled"
+                            filled_qty = max(filled_qty, qty)
+                            ord_qty = max(ord_qty, qty)
                         if status in {"filled", "partial"} and filled_qty > 0:
-                            remain = max(0, qty - filled_qty)
+                            remain = remaining_qty if remaining_qty >= 0 else max(0, qty - filled_qty)
                             if remain <= 0:
+                                manual_watch_symbols.discard(symbol)
+                                watch_candidates[:] = [c for c in watch_candidates if c.symbol != symbol]
                                 clear_position_state(symbol)
                             else:
                                 positions[symbol] = remain
@@ -2978,7 +3016,10 @@ def main() -> None:
     boot_now = datetime.now(KST)
     boot_hhmm = boot_now.hour * 100 + boot_now.minute
     first_run_at_window_open = boot_hhmm < int(args.refresh_start_hhmm)
-    suppress_initial_refresh_once = not first_run_at_window_open
+    suppress_initial_refresh_once = (
+        (not first_run_at_window_open)
+        and bool(watch_candidates or any(q > 0 for q in positions.values()) or theme_selection_day == boot_now.date())
+    )
 
     for cycle in range(max(1, args.max_cycles)):
         now = datetime.now(KST)
@@ -3372,13 +3413,26 @@ def main() -> None:
                                 time.sleep(wait_sec)
                                 continue
                             raise
+                        remaining_qty = confirm_holding_qty(
+                            base_url=args.base_url,
+                            token=token,
+                            app_key=args.app_key,
+                            app_secret=args.app_secret,
+                            cano=args.cano,
+                            acnt_prdt_cd=args.acnt_prdt_cd,
+                            symbol=c.symbol,
+                        )
+                        if remaining_qty == 0:
+                            status = "filled"
+                            filled_qty = max(filled_qty, qty)
+                            ord_qty = max(ord_qty, qty)
                         if status == "filled":
                             notifier.send(f"매도체결 {display_name(c.name, c.symbol)} {filled_qty}주 | 주문번호:{odno}")
                             clear_position_state(c.symbol)
                             finish_if_all_closed(carryover_exit)
                         elif status == "partial":
                             notifier.send(f"매도부분체결 {display_name(c.name, c.symbol)} {filled_qty}/{max(ord_qty, qty)}주 | 주문번호:{odno}")
-                            remain = max(0, qty - max(0, filled_qty))
+                            remain = remaining_qty if remaining_qty >= 0 else max(0, qty - max(0, filled_qty))
                             positions[c.symbol] = remain
                             persist_runtime_state()
                             if remain <= 0:
