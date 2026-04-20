@@ -3086,6 +3086,12 @@ def main() -> None:
                 strict_filtered_count = 0
         poll_telegram_commands(now)
         sync_holdings_from_account(now)
+        if manual_selection_requested and not in_refresh_window(now, args.refresh_start_hhmm, args.refresh_end_hhmm):
+            if hhmm < int(args.refresh_start_hhmm):
+                notifier.send(f"종목선정대기 | {int(args.refresh_start_hhmm):04d} 이후 실행")
+            else:
+                notifier.send(f"종목선정불가 | {int(args.refresh_end_hhmm):04d} 이후 종료")
+                manual_selection_requested = False
         if in_refresh_window(now, args.refresh_start_hhmm, args.refresh_end_hhmm):
             holding_count = sum(1 for q in positions.values() if q > 0)
             slots_left = max(0, int(args.max_positions) - holding_count)
@@ -3118,7 +3124,7 @@ def main() -> None:
                         and nonholding_watch_count >= max(1, slots_left)
                     )
                 )
-                if tracking_active:
+                if tracking_active and not manual_selection_requested:
                     last_refresh = now
                     need_refresh = False
                     manual_selection_requested = False
