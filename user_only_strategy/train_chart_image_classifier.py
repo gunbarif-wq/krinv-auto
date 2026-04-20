@@ -42,7 +42,13 @@ def load_dataset(dataset_dir: Path, image_size: int) -> Tuple[np.ndarray, np.nda
     names: List[str] = []
     with meta_path.open("r", encoding="utf-8") as f:
         for row in csv.DictReader(f):
-            img_path = dataset_dir / row["image_path"]
+            raw_path = Path(row["image_path"])
+            if raw_path.is_absolute():
+                img_path = raw_path
+            else:
+                img_path = dataset_dir / raw_path
+                if not img_path.exists():
+                    img_path = dataset_dir.parent / raw_path
             if not img_path.exists():
                 continue
             try:

@@ -537,7 +537,15 @@ def format_candidate_preview(universe: List[Tuple[str, str]], limit: int = 9999)
     return ", ".join(out)
 
 
-def send_candidate_list_messages(notifier: "Notifier", universe: List[Tuple[str, str]], chunk_size: int = 25) -> None:
+def send_candidate_list_messages(
+    notifier: "Notifier",
+    universe: List[Tuple[str, str]],
+    chunk_size: int = 25,
+    *,
+    enabled: bool = False,
+) -> None:
+    if not enabled:
+        return
     names = [display_name(name, symbol) for symbol, name in universe]
     if not names:
         return
@@ -581,6 +589,11 @@ def load_watch_state(path_text: str) -> Dict[str, object]:
         "peak_price": {},
         "entry_time": {},
         "limit_up_hold_day": {},
+        "watch_candidates": [],
+        "bought_symbols_today": [],
+        "strict_filtered_count": 0,
+        "theme_selection_day": "",
+        "daily_trade_finished_day": "",
     }
     if not path.exists():
         return default
@@ -600,6 +613,43 @@ def load_watch_state(path_text: str) -> Dict[str, object]:
     return merged
 
 
+def candidate_to_state_row(candidate: "Candidate") -> Dict[str, object]:
+    return {
+        "symbol": str(candidate.symbol).zfill(6),
+        "name": str(candidate.name or ""),
+        "close": float(candidate.close),
+        "ma3": float(candidate.ma3),
+        "ma5": float(candidate.ma5),
+        "ma10": float(candidate.ma10),
+        "ma20": float(candidate.ma20),
+        "ma60": float(candidate.ma60),
+        "leader_score": float(candidate.leader_score),
+        "leader_reason": str(candidate.leader_reason or ""),
+        "theme_id": int(candidate.theme_id),
+        "theme_name": str(candidate.theme_name or ""),
+    }
+
+
+def candidate_from_state_row(row: Dict[str, object]) -> "Candidate | None":
+    symbol = str(row.get("symbol", "")).strip()
+    if not symbol.isdigit():
+        return None
+    return Candidate(
+        symbol=symbol.zfill(6),
+        name=str(row.get("name", "") or symbol),
+        close=_to_float(row.get("close")),
+        ma3=_to_float(row.get("ma3")),
+        ma5=_to_float(row.get("ma5")),
+        ma10=_to_float(row.get("ma10")),
+        ma20=_to_float(row.get("ma20")),
+        ma60=_to_float(row.get("ma60")),
+        leader_score=_to_float(row.get("leader_score")),
+        leader_reason=str(row.get("leader_reason", "") or ""),
+        theme_id=_to_int(row.get("theme_id")),
+        theme_name=str(row.get("theme_name", "") or ""),
+    )
+
+
 def save_watch_state(
     path_text: str,
     *,
@@ -608,6 +658,11 @@ def save_watch_state(
     peak_price: Dict[str, float],
     entry_time: Dict[str, datetime],
     limit_up_hold_day: Dict[str, datetime.date],
+    watch_candidates: List["Candidate"],
+    bought_symbols_today: set[str],
+    strict_filtered_count: int,
+    theme_selection_day: datetime.date | None,
+    daily_trade_finished_day: datetime.date | None,
 ) -> None:
     path = Path(path_text).expanduser()
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -618,6 +673,11 @@ def save_watch_state(
         "peak_price": {str(k).zfill(6): float(v) for k, v in peak_price.items() if str(k).isdigit()},
         "entry_time": {str(k).zfill(6): v.isoformat() for k, v in entry_time.items() if isinstance(v, datetime)},
         "limit_up_hold_day": {str(k).zfill(6): v.isoformat() for k, v in limit_up_hold_day.items() if hasattr(v, "isoformat")},
+        "watch_candidates": [candidate_to_state_row(candidate) for candidate in watch_candidates if str(candidate.symbol).isdigit()],
+        "bought_symbols_today": sorted({str(x).zfill(6) for x in bought_symbols_today if str(x).isdigit()}),
+        "strict_filtered_count": max(0, int(strict_filtered_count)),
+        "theme_selection_day": theme_selection_day.isoformat() if hasattr(theme_selection_day, "isoformat") else "",
+        "daily_trade_finished_day": daily_trade_finished_day.isoformat() if hasattr(daily_trade_finished_day, "isoformat") else "",
     }
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
@@ -1933,8 +1993,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--symbol-name-file", default=os.getenv("KRX_SYMBOL_NAME_FILE", DEFAULT_SYMBOL_NAME_FILE))
     p.add_argument("--watch-state-file", default=os.getenv("WATCH_STATE_FILE", DEFAULT_WATCH_STATE_FILE))
     p.add_argument("--chart-classifier-model", default=os.getenv("CHART_CLASSIFIER_MODEL", ""), help="optional image classifier pickle path")
-    p.add_argument("--chart-classifier-threshold", type=float, default=float(os.getenv("CHART_CLASSIFIER_THRESHOLD", "0.55")))
-    p.add_argument("--chart-classifier-bonus-scale", type=float, default=float(os.getenv("CHART_CLASSIFIER_BONUS_SCALE", "25.0")))
+    p.add_argument("--chart-classifier-threshold", type=float, default=float(os.getenv("CHART_CLASSIFIER_THRESHOLD", "0.50")))
+    p.add_argument("--chart-classifier-bonus-scale", type=float, default=float(os.getenv("CHART_CLASSIFIER_BONUS_SCALE", "45.0")))
     return p.parse_args()
 
 
@@ -2250,8 +2310,38 @@ def sell_signal_from_minute_bars(rows: List[Dict[str, float]]) -> Tuple[bool, st
         np.isfinite(rsi14[-1]) and np.isfinite(mid[-1]) and close[-1] < mid[-1] and rsi14[-1] < 50
     )
     ma20_break = np.isfinite(ma20[-1]) and close[-1] < ma20[-1]
-    ok = (impulse_dead and (stoch_dead or dmi_dead)) or (ma20_break and (rsi_mid_break or impulse_dead))
-    reason = f"stoch_dead={stoch_dead} dmi_dead={dmi_dead} impulse_dead={impulse_dead} rsi_mid_break={rsi_mid_break} ma20_break={ma20_break}"
+    ma20_rising = (
+        np.isfinite(ma20[-1])
+        and np.isfinite(ma20[-2])
+        and ma20[-1] >= ma20[-2]
+    )
+    dmi_bull_alive = (
+        np.isfinite(plus_di[-1])
+        and np.isfinite(minus_di[-1])
+        and plus_di[-1] > minus_di[-1] * 1.05
+    )
+    impulse_alive = (
+        np.isfinite(imp[-1])
+        and np.isfinite(imp_signal[-1])
+        and np.isfinite(imp_hist[-1])
+        and np.isfinite(imp_hist[-2])
+        and imp[-1] >= imp_signal[-1]
+        and imp_hist[-1] >= imp_hist[-2] * 0.85
+    )
+    strong_trend_hold = (
+        np.isfinite(close[-1])
+        and np.isfinite(ma20[-1])
+        and close[-1] >= ma20[-1]
+        and ma20_rising
+        and dmi_bull_alive
+        and impulse_alive
+    )
+    raw_sell = (impulse_dead and (stoch_dead or dmi_dead)) or (ma20_break and (rsi_mid_break or impulse_dead))
+    ok = raw_sell and not strong_trend_hold
+    reason = (
+        f"stoch_dead={stoch_dead} dmi_dead={dmi_dead} impulse_dead={impulse_dead} "
+        f"rsi_mid_break={rsi_mid_break} ma20_break={ma20_break} strong_trend_hold={strong_trend_hold}"
+    )
     return ok, reason
 
 
@@ -2315,6 +2405,18 @@ def main() -> None:
         notifier.send(f"종목명파일 갱신 {refreshed_symbol_names}개")
     elif symbol_name_store:
         notifier.send(f"종목명파일 로드 {len(symbol_name_store)}개")
+
+    today_local = datetime.now(KST).date()
+    if theme_selection_day != today_local:
+        theme_selection_day = None
+        strict_filtered_count = 0
+        watch_candidates[:] = [candidate for candidate in watch_candidates if candidate.theme_name == "수동감시"]
+    if daily_trade_finished_day != today_local:
+        daily_trade_finished_day = None
+    if entry_time:
+        bought_symbols_today = {symbol for symbol, when in entry_time.items() if when.date() == today_local}
+    else:
+        bought_symbols_today.clear()
 
     def sync_holdings_from_account(now: datetime) -> None:
         nonlocal last_holdings_sync_at
@@ -2417,6 +2519,31 @@ def main() -> None:
             limit_up_hold_day[str(symbol).zfill(6)] = datetime.fromisoformat(f"{value}T00:00:00").date()
         except Exception:
             continue
+    for symbol in list(saved_state.get("bought_symbols_today", [])):
+        if str(symbol).strip().isdigit():
+            bought_symbols_today.add(str(symbol).strip().zfill(6))
+    strict_filtered_count = max(0, _to_int(saved_state.get("strict_filtered_count")))
+    try:
+        raw_theme_selection_day = str(saved_state.get("theme_selection_day", "")).strip()
+        if raw_theme_selection_day:
+            theme_selection_day = datetime.fromisoformat(f"{raw_theme_selection_day}T00:00:00").date()
+    except Exception:
+        theme_selection_day = None
+    try:
+        raw_daily_trade_finished_day = str(saved_state.get("daily_trade_finished_day", "")).strip()
+        if raw_daily_trade_finished_day:
+            daily_trade_finished_day = datetime.fromisoformat(f"{raw_daily_trade_finished_day}T00:00:00").date()
+    except Exception:
+        daily_trade_finished_day = None
+    for row in list(saved_state.get("watch_candidates", [])):
+        if not isinstance(row, dict):
+            continue
+        restored_candidate = candidate_from_state_row(row)
+        if restored_candidate is None:
+            continue
+        watch_candidates.append(restored_candidate)
+        if restored_candidate.name:
+            known_name_map[restored_candidate.symbol] = restored_candidate.name
 
     def persist_runtime_state() -> None:
         save_watch_state(
@@ -2426,6 +2553,11 @@ def main() -> None:
             peak_price=peak_price,
             entry_time=entry_time,
             limit_up_hold_day=limit_up_hold_day,
+            watch_candidates=watch_candidates,
+            bought_symbols_today=bought_symbols_today,
+            strict_filtered_count=strict_filtered_count,
+            theme_selection_day=theme_selection_day,
+            daily_trade_finished_day=daily_trade_finished_day,
         )
 
     def notify_net_error(exc: Exception) -> int:
@@ -2890,13 +3022,28 @@ def main() -> None:
                 last_refresh = now
                 need_refresh = False
             if need_refresh:
-                tracking_active = bool(watch_candidates and strict_filtered_count > 0) or any(q > 0 for q in positions.values()) or is_daily_trade_finished(now.date()) or theme_selection_day == now.date()
+                active_watch_symbols = {c.symbol for c in watch_candidates}
+                nonholding_watch_count = sum(
+                    1 for symbol in active_watch_symbols if positions.get(symbol, 0) <= 0
+                )
+                tracking_active = (
+                    is_daily_trade_finished(now.date())
+                    or (
+                        theme_selection_day == now.date()
+                        and nonholding_watch_count >= max(1, slots_left)
+                    )
+                    or (
+                        bool(watch_candidates and strict_filtered_count > 0)
+                        and nonholding_watch_count >= max(1, slots_left)
+                    )
+                )
                 if tracking_active:
                     last_refresh = now
                     need_refresh = False
                     notifier.send("재선정대기: 현재 감시 흐름 유지")
                 else:
-                    notifier.send("후보군선정 시작" if hhmm < int(args.market_open_hhmm) else "종목선정 시작")
+                    if args.notify_theme_progress:
+                        notifier.send("후보군선정 시작" if hhmm < int(args.market_open_hhmm) else "종목선정 시작")
             if need_refresh:
                 # Fetch a wider pool first, then fill top N after exclusions.
                 fetch_pool_size = max(int(args.max_universe), int(args.max_universe) * 8)
@@ -2919,18 +3066,24 @@ def main() -> None:
                 universe = filtered_pool[: max(1, int(args.max_universe))]
                 removed_cnt = max(0, len(raw_universe) - len(filtered_pool))
                 trimmed_cnt = max(0, len(filtered_pool) - len(universe))
-                if removed_cnt > 0:
+                if removed_cnt > 0 and args.notify_theme_progress:
                     notifier.send(f"제외종목 적용 {removed_cnt}개")
-                if trimmed_cnt > 0:
+                if trimmed_cnt > 0 and args.notify_theme_progress:
                     notifier.send(f"후보풀 축약 {trimmed_cnt}개")
-                notifier.send(f"후보 {len(universe)}개")
+                if args.notify_theme_progress:
+                    notifier.send(f"후보 {len(universe)}개")
                 for symbol, name in universe:
                     if name:
                         known_name_map[symbol] = name
                 if universe:
                     persist_symbol_name_map()
                 if universe:
-                    send_candidate_list_messages(notifier, universe, chunk_size=25)
+                    send_candidate_list_messages(
+                        notifier,
+                        universe,
+                        chunk_size=25,
+                        enabled=bool(args.notify_theme_progress),
+                    )
                 prev_stats_map: Dict[str, PreviousDayStats] = {}
                 if universe and not args.disable_prev_day_score:
                     prev_universe = universe[: max(1, int(args.prev_day_max_symbols))]
@@ -2942,7 +3095,7 @@ def main() -> None:
                         universe=prev_universe,
                         lookback_days=int(args.prev_day_lookback_days),
                     )
-                    if prev_stats_map:
+                    if prev_stats_map and args.notify_theme_progress:
                         notifier.send(f"전일데이터 {len(prev_stats_map)}개 반영")
                 if not in_korean_trading_session(now, args.market_open_hhmm, args.market_close_hhmm):
                     notifier.send("대장주판정대기: 08:00 이후 분봉 확인")
@@ -2994,6 +3147,7 @@ def main() -> None:
                         notifier.send(f"테마그룹 | {format_theme_group(group)}")
                     notifier.send(f"대장감시 {len(merged_watch)}개 | {watch_preview(merged_watch)}")
                 watch_candidates = merged_watch
+                persist_runtime_state()
                 if watch_candidates:
                     notifier.send(f"추적 {len(watch_candidates)}개 | {watch_preview(watch_candidates)}")
                 last_refresh = datetime.now(KST)
@@ -3140,15 +3294,24 @@ def main() -> None:
                 ep = float(entry_price.get(c.symbol, close))
                 pp = max(float(peak_price.get(c.symbol, ep)), float(close))
                 peak_price[c.symbol] = pp
+                profit_pct = ((float(close) / ep) - 1.0) if ep > 0 else 0.0
                 stop_loss_ok = float(close) <= ep * (1.0 - max(0.0, float(args.sell_stop_loss_pct)))
-                trail_armed = pp >= ep * (1.0 + max(0.0, float(args.sell_trailing_activate_pct)))
-                trailing_ok = trail_armed and (float(close) <= pp * (1.0 - max(0.0, float(args.sell_trailing_stop_pct))))
+                trail_activate_pct = max(0.0, float(args.sell_trailing_activate_pct))
+                trail_stop_pct = max(0.0, float(args.sell_trailing_stop_pct))
+                if profit_pct >= 0.04:
+                    trail_stop_pct = max(trail_stop_pct, 0.03)
+                elif profit_pct >= 0.025:
+                    trail_stop_pct = max(trail_stop_pct, 0.025)
+                trail_armed = pp >= ep * (1.0 + trail_activate_pct)
+                trailing_ok = trail_armed and (float(close) <= pp * (1.0 - trail_stop_pct))
                 hold_min = -1
                 hold_time_ok = False
                 et = entry_time.get(c.symbol)
                 if et is not None:
                     hold_min = int((now - et).total_seconds() // 60)
                     hold_time_ok = int(args.sell_max_hold_min) > 0 and hold_min >= int(args.sell_max_hold_min)
+                if profit_pct >= 0.015 and not stop_loss_ok and not trailing_ok:
+                    hold_time_ok = False
                 final_sell_ok = bool(sell_ok or stop_loss_ok or trailing_ok or hold_time_ok)
                 reason_parts: List[str] = []
                 if sell_ok:
@@ -3156,7 +3319,7 @@ def main() -> None:
                 if stop_loss_ok:
                     reason_parts.append(f"손절(entry={ep:.0f},close={float(close):.0f})")
                 if trailing_ok:
-                    reason_parts.append(f"트레일링(entry={ep:.0f},peak={pp:.0f},close={float(close):.0f})")
+                    reason_parts.append(f"트레일링(entry={ep:.0f},peak={pp:.0f},close={float(close):.0f},trail={trail_stop_pct*100:.1f}%)")
                 if hold_time_ok:
                     reason_parts.append(f"시간청산(hold={hold_min}m)")
                 final_sell_reason = " | ".join(reason_parts) if reason_parts else "no-sell"
