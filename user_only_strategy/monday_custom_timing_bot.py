@@ -2835,6 +2835,7 @@ def main() -> None:
                     if ok:
                         odno = str(res.get("output", {}).get("ODNO", "")).strip()
                         notifier.send(f"수동매수주문 {display_name(name, symbol)} {qty}주 {close:.0f}원 | 주문번호:{odno}")
+                        sleep_with_telegram_poll(5)
                         status, filled_qty, ord_qty = wait_order_fill_status(
                             base_url=args.base_url,
                             token=token,
@@ -2901,6 +2902,7 @@ def main() -> None:
                     if ok:
                         odno = str(res.get("output", {}).get("ODNO", "")).strip()
                         notifier.send(f"수동매도주문 {display_name(name, symbol)} {qty}주 {close:.0f}원 | 주문번호:{odno}")
+                        sleep_with_telegram_poll(5)
                         status, filled_qty, ord_qty = wait_order_fill_status(
                             base_url=args.base_url,
                             token=token,
@@ -3469,6 +3471,7 @@ def main() -> None:
                     if ok:
                         odno = str(res.get("output", {}).get("ODNO", "")).strip()
                         notifier.send(f"매도주문접수 {display_name(c.name, c.symbol)} {qty}주 {close:.0f}원 | 주문번호:{odno} | {final_sell_reason}")
+                        sleep_with_telegram_poll(5)
                         try:
                             status, filled_qty, ord_qty = wait_order_fill_status(
                                 base_url=args.base_url,
@@ -3573,6 +3576,7 @@ def main() -> None:
                         if ok:
                             odno = str(res.get("output", {}).get("ODNO", "")).strip()
                             notifier.send(f"매수주문접수 {display_name(c.name, c.symbol)} {qty}주 {close:.0f}원 | 주문번호:{odno} | {buy_tag} | 신호시각:{signal_at.strftime('%H:%M:%S')}")
+                            sleep_with_telegram_poll(5)
                             try:
                                 status, filled_qty, ord_qty = wait_order_fill_status(
                                     base_url=args.base_url,
