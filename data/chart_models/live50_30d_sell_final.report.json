@@ -19,17 +19,10 @@
       "pca_logistic": {
         "accuracy": 0.6013333333333334,
         "balanced_accuracy": 0.5799695753665381
-      },
-      "pca_rf": {
-        "accuracy": 0.7226666666666667,
-        "balanced_accuracy": 0.5188186849214467
-      },
-      "pca_et": {
-        "accuracy": 0.7186666666666667,
-        "balanced_accuracy": 0.5103601122564062
       }
     },
-    "pca_dim": 64
+    "pca_dim": 64,
+    "portable_kind": "pca_logistic"
   },
   "model_out": "data\\chart_models\\live50_30d_sell_final.pkl"
 }

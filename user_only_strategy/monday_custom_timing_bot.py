@@ -993,7 +993,9 @@ def load_chart_classifier_payload(model_path_text: str) -> Dict[str, object] | N
     try:
         with model_path.open("rb") as f:
             payload = pickle.load(f)
-        if not isinstance(payload, dict) or "model" not in payload:
+        if not isinstance(payload, dict):
+            return None
+        if "model" not in payload and "portable_model" not in payload:
             return None
         payload["model_path"] = str(model_path)
         return payload
@@ -1014,12 +1016,44 @@ def inspect_chart_classifier_payload(model_path_text: str) -> Tuple[Dict[str, ob
             payload = pickle.load(f)
         if not isinstance(payload, dict):
             return None, f"모델형식오류 | {model_path}"
-        if "model" not in payload:
+        if "model" not in payload and "portable_model" not in payload:
             return None, f"모델키없음 | {model_path}"
         payload["model_path"] = str(model_path)
         return payload, f"로드완료 | {model_path}"
     except Exception as exc:
         return None, f"로드실패 {type(exc).__name__} | {model_path}"
+
+
+def score_portable_chart_model(portable_model: Dict[str, object], x: np.ndarray) -> float:
+    kind = str(portable_model.get("kind", "")).strip()
+    if kind == "constant":
+        label = int(portable_model.get("label", 0))
+        return 1.0 if label == 1 else 0.0
+    if kind == "logistic_raw":
+        coef = np.asarray(portable_model.get("coef", []), dtype=np.float32)
+        intercept = np.asarray(portable_model.get("intercept", []), dtype=np.float32)
+        if coef.size == 0:
+            return 0.0
+        logits = x @ coef.T
+        if intercept.size:
+            logits = logits + intercept.reshape(1, -1)
+        score = float(logits.reshape(-1)[0])
+        return float(1.0 / (1.0 + np.exp(-score)))
+    if kind == "pca_logistic":
+        mean = np.asarray(portable_model.get("mean", []), dtype=np.float32)
+        components = np.asarray(portable_model.get("components", []), dtype=np.float32)
+        coef = np.asarray(portable_model.get("coef", []), dtype=np.float32)
+        intercept = np.asarray(portable_model.get("intercept", []), dtype=np.float32)
+        if mean.size == 0 or components.size == 0 or coef.size == 0:
+            return 0.0
+        x_centered = x - mean.reshape(1, -1)
+        x_pca = x_centered @ components.T
+        logits = x_pca @ coef.T
+        if intercept.size:
+            logits = logits + intercept.reshape(1, -1)
+        score = float(logits.reshape(-1)[0])
+        return float(1.0 / (1.0 + np.exp(-score)))
+    return 0.0
 
 
 def resolve_chart_model_path(primary_text: str, fallback_relpath: str) -> str:
@@ -1051,6 +1085,7 @@ def score_chart_classifier_bonus(
         return 0.0, 0.0, f"차트점수=import_fail({type(e).__name__})"
 
     model = payload.get("model")
+    portable_model = payload.get("portable_model")
     image_size = int(payload.get("image_size", 96))
     window = rows[-40:]
     chart_rows = [
@@ -1071,7 +1106,9 @@ def score_chart_classifier_bonus(
         img = Image.open(image_path).convert("L").resize((image_size, image_size))
         x = np.asarray(img, dtype=np.float32).reshape(1, -1) / 255.0
         prob = 0.0
-        if hasattr(model, "predict_proba"):
+        if isinstance(portable_model, dict):
+            prob = score_portable_chart_model(portable_model, x)
+        elif hasattr(model, "predict_proba"):
             proba = model.predict_proba(x)[0]
             classes = getattr(model, "classes_", [])
             if len(classes) >= 2:

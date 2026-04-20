@@ -4,19 +4,19 @@ import argparse
 import csv
 import json
 import pickle
+import platform
 from collections import Counter
 from pathlib import Path
 from typing import List, Tuple
 
 import numpy as np
 from PIL import Image
-from sklearn.dummy import DummyClassifier
-from sklearn.ensemble import ExtraTreesClassifier, RandomForestClassifier
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import accuracy_score, balanced_accuracy_score
 from sklearn.model_selection import train_test_split
 from sklearn.pipeline import Pipeline
 from sklearn.decomposition import PCA
+import sklearn
 
 
 def parse_args() -> argparse.Namespace:
@@ -65,6 +65,38 @@ def load_dataset(dataset_dir: Path, image_size: int) -> Tuple[np.ndarray, np.nda
     return np.vstack(xs), np.array(ys, dtype=int), names
 
 
+def build_portable_payload(model) -> dict | None:
+    if isinstance(model, LogisticRegression):
+        return {
+            "kind": "logistic_raw",
+            "coef": np.asarray(model.coef_, dtype=np.float32).tolist(),
+            "intercept": np.asarray(model.intercept_, dtype=np.float32).tolist(),
+            "classes": np.asarray(model.classes_, dtype=np.int32).tolist(),
+        }
+    if isinstance(model, Pipeline):
+        steps = dict(model.named_steps)
+        pca = steps.get("pca")
+        clf = steps.get("clf")
+        if isinstance(pca, PCA) and isinstance(clf, LogisticRegression):
+            return {
+                "kind": "pca_logistic",
+                "mean": np.asarray(pca.mean_, dtype=np.float32).tolist(),
+                "components": np.asarray(pca.components_, dtype=np.float32).tolist(),
+                "coef": np.asarray(clf.coef_, dtype=np.float32).tolist(),
+                "intercept": np.asarray(clf.intercept_, dtype=np.float32).tolist(),
+                "classes": np.asarray(clf.classes_, dtype=np.int32).tolist(),
+            }
+    return None
+
+
+def build_constant_portable_payload(label: int) -> dict:
+    return {
+        "kind": "constant",
+        "label": int(label),
+        "classes": [int(label)],
+    }
+
+
 def main() -> None:
     args = parse_args()
     dataset_dir = Path(args.dataset_dir)
@@ -74,6 +106,9 @@ def main() -> None:
     x, y, names = load_dataset(dataset_dir, args.image_size)
     label_counts = {str(k): int(v) for k, v in sorted(Counter(y).items())}
 
+    comparison = {}
+    portable_kind = ""
+    portable = None
     if len(np.unique(y)) >= 2 and len(y) >= 8:
         x_train, x_test, y_train, y_test = train_test_split(
             x,
@@ -91,39 +126,10 @@ def main() -> None:
                     ("clf", LogisticRegression(max_iter=2000, class_weight="balanced", random_state=args.random_state)),
                 ]
             ),
-            "pca_rf": Pipeline(
-                [
-                    ("pca", PCA(n_components=pca_dim, random_state=args.random_state)),
-                    (
-                        "clf",
-                        RandomForestClassifier(
-                            n_estimators=300,
-                            random_state=args.random_state,
-                            class_weight="balanced_subsample",
-                            n_jobs=1,
-                        ),
-                    ),
-                ]
-            ),
-            "pca_et": Pipeline(
-                [
-                    ("pca", PCA(n_components=pca_dim, random_state=args.random_state)),
-                    (
-                        "clf",
-                        ExtraTreesClassifier(
-                            n_estimators=400,
-                            random_state=args.random_state,
-                            class_weight="balanced",
-                            n_jobs=1,
-                        ),
-                    ),
-                ]
-            ),
         }
         best_name = ""
         best_model = None
         best_metrics = None
-        comparison = {}
         for name, candidate in candidates.items():
             candidate.fit(x_train, y_train)
             y_pred = candidate.predict(x_test)
@@ -144,6 +150,8 @@ def main() -> None:
                 best_model = candidate
                 best_metrics = cand_metrics
         model = best_model
+        portable = build_portable_payload(model)
+        portable_kind = str(portable.get("kind", "")) if portable else ""
         metrics = {
             "mode": str(best_name),
             "train_samples": int(len(y_train)),
@@ -152,25 +160,35 @@ def main() -> None:
             "balanced_accuracy": float(best_metrics["balanced_accuracy"]),
             "model_comparison": comparison,
             "pca_dim": int(pca_dim),
+            "portable_kind": portable_kind,
         }
     else:
-        model = DummyClassifier(strategy="most_frequent")
-        model.fit(x, y)
-        y_pred = model.predict(x)
+        model = None
+        constant_label = int(y[0]) if len(y) else 0
+        y_pred = np.full_like(y, constant_label)
+        portable = build_constant_portable_payload(constant_label)
+        portable_kind = str(portable.get("kind", "")) if portable else ""
         metrics = {
-            "mode": "dummy_most_frequent",
+            "mode": "constant_fallback",
             "train_samples": int(len(y)),
             "test_samples": int(len(y)),
             "accuracy": float(accuracy_score(y, y_pred)),
             "balanced_accuracy": float(balanced_accuracy_score(y, y_pred)),
+            "portable_kind": portable_kind,
         }
 
     model_out.parent.mkdir(parents=True, exist_ok=True)
     payload = {
-        "model": model,
+        "model": model if portable is None else None,
+        "portable_model": portable,
         "image_size": int(args.image_size),
         "label_counts": label_counts,
         "dataset_dir": str(dataset_dir),
+        "runtime_versions": {
+            "python": platform.python_version(),
+            "numpy": np.__version__,
+            "sklearn": sklearn.__version__,
+        },
     }
     with model_out.open("wb") as f:
         pickle.dump(payload, f)
