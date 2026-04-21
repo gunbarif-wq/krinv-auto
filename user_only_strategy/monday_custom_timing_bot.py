@@ -809,6 +809,13 @@ def fallback_candidate_from_universe(universe: List[Tuple[str, str]]) -> Candida
     )
 
 
+def _previous_business_day(ref_day: date) -> date:
+    d = ref_day - timedelta(days=1)
+    while d.weekday() >= 5:
+        d -= timedelta(days=1)
+    return d
+
+
 def fetch_minute_ohlcv(
     base_url: str,
     token: str,
@@ -817,6 +824,8 @@ def fetch_minute_ohlcv(
     symbol: str,
     count_hint: int = 180,
     market_code: str = DEFAULT_MINUTE_MARKET_CODE,
+    ymd: str | None = None,
+    cursor_time: str | None = None,
 ) -> List[Dict[str, float]]:
     url = f"{base_url}/uapi/domestic-stock/v1/quotations/inquire-time-itemchartprice"
     headers = {
@@ -826,8 +835,8 @@ def fetch_minute_ohlcv(
         "tr_id": "FHKST03010200",
     }
     now = datetime.now(KST)
-    ymd = now.strftime("%Y%m%d")
-    cursor_time = now.strftime("%H%M%S")
+    ymd = str(ymd or now.strftime("%Y%m%d"))
+    cursor_time = str(cursor_time or now.strftime("%H%M%S"))
     out_map: Dict[str, Dict[str, float]] = {}
 
     # KIS returns roughly 30 one-minute rows per request. The NXT window can
@@ -883,6 +892,46 @@ def fetch_minute_ohlcv(
 
     rows = [out_map[k] for k in sorted(out_map.keys())]
     return rows[-max(30, count_hint) :]
+
+
+def ensure_chart_window_rows(
+    rows: List[Dict[str, float]],
+    *,
+    base_url: str,
+    token: str,
+    app_key: str,
+    app_secret: str,
+    symbol: str,
+    market_code: str,
+    bar_minutes: int,
+    min_rows: int = 40,
+) -> List[Dict[str, float]]:
+    if len(rows) >= min_rows:
+        return rows
+    try:
+        today = datetime.now(KST).date()
+        prev_day = _previous_business_day(today)
+        prev_rows_raw = fetch_minute_ohlcv(
+            base_url=base_url,
+            token=token,
+            app_key=app_key,
+            app_secret=app_secret,
+            symbol=symbol,
+            count_hint=max(120, raw_count_hint_for_resampled_bars(min_rows, bar_minutes)),
+            market_code=market_code,
+            ymd=prev_day.strftime("%Y%m%d"),
+            cursor_time="153000",
+        )
+        prev_rows = resample_bars(prev_rows_raw, bar_minutes=bar_minutes)
+        if not prev_rows:
+            return rows
+        merged_map: Dict[str, Dict[str, float]] = {}
+        for row in prev_rows + rows:
+            merged_map[str(int(row["date"]))] = row
+        merged = [merged_map[k] for k in sorted(merged_map.keys())]
+        return merged[-max(min_rows, len(rows)) :]
+    except Exception:
+        return rows
 
 
 def sma(arr: np.ndarray, window: int) -> np.ndarray:
@@ -1164,8 +1213,10 @@ def score_chart_classifier_bonus(
     bonus_scale: float,
     bar_minutes: int,
 ) -> Tuple[float, float, str]:
-    if not payload or len(rows) < 40:
+    if not payload:
         return 0.0, 0.0, "차트점수=off"
+    if len(rows) < 40:
+        return 0.0, 0.0, f"차트점수=warmup({len(rows)}/40)"
     try:
         from PIL import Image
         from user_only_strategy.build_chart_image_dataset import render_chart_png
@@ -3455,6 +3506,17 @@ def main() -> None:
             rows = resample_bars(raw_rows, bar_minutes=args.bar_minutes)
             if not rows:
                 continue
+            rows = ensure_chart_window_rows(
+                rows,
+                base_url=args.base_url,
+                token=token,
+                app_key=args.app_key,
+                app_secret=args.app_secret,
+                symbol=c.symbol,
+                market_code=args.minute_market_code,
+                bar_minutes=int(args.bar_minutes),
+                min_rows=40,
+            )
             net_err_streak = 0
             close = rows[-1]["close"]
             has_pos = positions.get(c.symbol, 0) > 0
