@@ -78,6 +78,35 @@ class _HttpThrottle:
 HTTP_THROTTLE = _HttpThrottle(float(os.getenv("KIS_HTTP_MIN_INTERVAL_SEC", "0.35")))
 
 
+class KisHttpError(RuntimeError):
+    def __init__(self, payload: Dict | None = None, message: str = "") -> None:
+        self.payload = payload or {}
+        super().__init__(message or json.dumps(self.payload, ensure_ascii=False))
+
+
+def is_token_expired_error(res: Dict | None) -> bool:
+    if not isinstance(res, dict):
+        return False
+    msg_cd = str(res.get("msg_cd", "")).strip()
+    msg1 = str(res.get("msg1", "")).strip()
+    return "EGW00123" in msg_cd or "기간이 만료된 token" in msg1
+
+
+def _extract_error_payload(response: requests.Response) -> Dict:
+    try:
+        data = response.json()
+        if isinstance(data, dict):
+            return {
+                "rt_cd": str(data.get("rt_cd", "1")).strip() or "1",
+                "msg_cd": str(data.get("msg_cd", "")).strip(),
+                "msg1": str(data.get("msg1", "")).strip() or f"http_{response.status_code}",
+                "output": data.get("output") if isinstance(data.get("output"), dict) else {},
+            }
+    except Exception:
+        pass
+    return {"rt_cd": "1", "msg1": f"http_{response.status_code} {response.text[:220]}"}
+
+
 def load_dotenv(dotenv_path: str = ".env") -> None:
     path = Path(dotenv_path)
     if not path.exists():
@@ -108,26 +137,47 @@ def request_json_with_retry(
     sleep_base: float = 0.7,
 ) -> Dict:
     last_err: Exception | None = None
+    request_headers = dict(headers)
+    refreshed_once = False
     for i in range(max(1, retries)):
         try:
             HTTP_THROTTLE.wait()
             if method.lower() == "get":
-                r = requests.get(url, headers=headers, params=params, timeout=timeout)
+                r = requests.get(url, headers=request_headers, params=params, timeout=timeout)
             else:
-                r = requests.post(url, headers=headers, data=json.dumps(params), timeout=timeout)
-            r.raise_for_status()
+                r = requests.post(url, headers=request_headers, data=json.dumps(params), timeout=timeout)
+            if r.status_code >= 400:
+                payload = _extract_error_payload(r)
+                if is_token_expired_error(payload) and not refreshed_once:
+                    refreshed_once = True
+                    request_headers["authorization"] = (
+                        f"Bearer {get_access_token(request_headers.get('appKey', ''), request_headers.get('appSecret', ''), base_url=_base_url_from_url(url))}"
+                    )
+                    continue
+                raise KisHttpError(payload)
             return r.json()
+        except KisHttpError as e:
+            last_err = e
+            if i + 1 < retries:
+                time.sleep(sleep_base * (i + 1))
         except Exception as e:
             last_err = e
             if i + 1 < retries:
                 time.sleep(sleep_base * (i + 1))
     if last_err:
+        if isinstance(last_err, KisHttpError):
+            raise last_err
         raise last_err
     raise RuntimeError("request failed")
 
 
 def is_demo_base_url(base_url: str) -> bool:
     return "openapivts" in base_url.lower()
+
+
+def _base_url_from_url(url: str) -> str:
+    m = re.match(r"^(https?://[^/]+)", str(url).strip())
+    return m.group(1) if m else str(url).strip()
 
 
 def order_tr_id(base_url: str, side: str) -> str:
@@ -175,29 +225,29 @@ def place_order(
         "ORD_UNPR": "0",
         "EXCG_ID_DVSN_CD": "KRX",
     }
-    hashkey = get_hashkey(base_url, app_key, app_secret, body)
-    headers = {
-        "authorization": f"Bearer {token}",
-        "appKey": app_key,
-        "appSecret": app_secret,
-        "tr_id": tr_id,
-        "custtype": "P",
-        "hashkey": hashkey,
-        "content-type": "application/json",
-    }
-    HTTP_THROTTLE.wait()
-    r = requests.post(url, headers=headers, data=json.dumps(body), timeout=15)
-    if r.status_code >= 400:
-        try:
-            data = r.json()
-            return {
-                "rt_cd": "1",
-                "msg_cd": str(data.get("msg_cd", "")).strip(),
-                "msg1": f"http_{r.status_code} {json.dumps(data, ensure_ascii=False)}",
-            }
-        except Exception:
-            return {"rt_cd": "1", "msg1": f"http_{r.status_code} {r.text[:220]}"}
-    return r.json()
+    auth_token = token
+    for attempt in range(2):
+        hashkey = get_hashkey(base_url, app_key, app_secret, body)
+        headers = {
+            "authorization": f"Bearer {auth_token}",
+            "appKey": app_key,
+            "appSecret": app_secret,
+            "tr_id": tr_id,
+            "custtype": "P",
+            "hashkey": hashkey,
+            "content-type": "application/json",
+        }
+        HTTP_THROTTLE.wait()
+        r = requests.post(url, headers=headers, data=json.dumps(body), timeout=15)
+        if r.status_code < 400:
+            return r.json()
+        payload = _extract_error_payload(r)
+        if is_token_expired_error(payload) and attempt == 0:
+            auth_token = get_access_token(app_key, app_secret, base_url=base_url)
+            continue
+        payload["msg1"] = f"http_{r.status_code} {json.dumps(payload, ensure_ascii=False)}"
+        return payload
+    return {"rt_cd": "1", "msg1": "unexpected_order_retry_failure"}
 
 
 def format_kis_error(res: Dict) -> str:
@@ -438,11 +488,16 @@ def fetch_account_budget_info(
     total_equity = 0.0
     if isinstance(summary_rows, list) and summary_rows:
         row = summary_rows[0] if isinstance(summary_rows[0], dict) else {}
-        available_cash = max(
-            _to_float(row.get("dnca_tot_amt")),
-            _to_float(row.get("ord_psbl_cash")),
-            _to_float(row.get("prvs_rcdl_excc_amt")),
-        )
+        ord_psbl_cash = _to_float(row.get("ord_psbl_cash"))
+        dnca_tot_amt = _to_float(row.get("dnca_tot_amt"))
+        prvs_rcdl_excc_amt = _to_float(row.get("prvs_rcdl_excc_amt"))
+        cash_only_candidates = [x for x in (dnca_tot_amt, prvs_rcdl_excc_amt) if x > 0]
+        if cash_only_candidates:
+            available_cash = min(cash_only_candidates)
+            if ord_psbl_cash > 0:
+                available_cash = min(available_cash, ord_psbl_cash)
+        else:
+            available_cash = ord_psbl_cash if ord_psbl_cash > 0 else 0.0
         total_equity = max(
             _to_float(row.get("tot_evlu_amt")),
             _to_float(row.get("scts_evlu_amt")) + available_cash,
@@ -470,10 +525,9 @@ def compute_order_budget_krw(
     cano: str,
     acnt_prdt_cd: str,
 ) -> float:
-    if float(args.order_krw) > 0:
-        return max(0.0, float(args.order_krw))
     pct = min(1.0, max(0.0, float(args.position_size_pct)))
-    fallback_budget = max(0.0, float(args.initial_cash) * pct)
+    requested_budget = max(0.0, float(args.order_krw)) if float(args.order_krw) > 0 else -1.0
+    fallback_budget = requested_budget if requested_budget >= 0 else max(0.0, float(args.initial_cash) * pct)
     try:
         available_cash, total_equity = fetch_account_budget_info(
             base_url=base_url,
@@ -485,6 +539,8 @@ def compute_order_budget_krw(
         )
     except Exception:
         return fallback_budget
+    if requested_budget >= 0:
+        return max(0.0, min(available_cash, requested_budget))
     if total_equity <= 0:
         return min(available_cash, fallback_budget) if available_cash > 0 else fallback_budget
     return max(0.0, min(available_cash, total_equity * pct))
@@ -702,6 +758,7 @@ def load_watch_state(path_text: str) -> Dict[str, object]:
         "limit_up_hold_day": {},
         "watch_candidates": [],
         "bought_symbols_today": [],
+        "traded_symbols_today": [],
         "strict_filtered_count": 0,
         "theme_selection_day": "",
         "daily_trade_finished_day": "",
@@ -771,6 +828,7 @@ def save_watch_state(
     limit_up_hold_day: Dict[str, datetime.date],
     watch_candidates: List["Candidate"],
     bought_symbols_today: set[str],
+    traded_symbols_today: set[str],
     strict_filtered_count: int,
     theme_selection_day: datetime.date | None,
     daily_trade_finished_day: datetime.date | None,
@@ -786,6 +844,7 @@ def save_watch_state(
         "limit_up_hold_day": {str(k).zfill(6): v.isoformat() for k, v in limit_up_hold_day.items() if hasattr(v, "isoformat")},
         "watch_candidates": [candidate_to_state_row(candidate) for candidate in watch_candidates if str(candidate.symbol).isdigit()],
         "bought_symbols_today": sorted({str(x).zfill(6) for x in bought_symbols_today if str(x).isdigit()}),
+        "traded_symbols_today": sorted({str(x).zfill(6) for x in traded_symbols_today if str(x).isdigit()}),
         "strict_filtered_count": max(0, int(strict_filtered_count)),
         "theme_selection_day": theme_selection_day.isoformat() if hasattr(theme_selection_day, "isoformat") else "",
         "daily_trade_finished_day": daily_trade_finished_day.isoformat() if hasattr(daily_trade_finished_day, "isoformat") else "",
@@ -1218,7 +1277,6 @@ def score_chart_classifier_bonus(
     if len(rows) < 40:
         return 0.0, 0.0, f"차트점수=warmup({len(rows)}/40)"
     try:
-        from PIL import Image
         from user_only_strategy.build_chart_image_dataset import render_chart_png
     except Exception as e:
         return 0.0, 0.0, f"차트점수=import_fail({type(e).__name__})"
@@ -1242,8 +1300,22 @@ def score_chart_classifier_bonus(
     image_path = cache_dir / f"{symbol}_{bar_minutes}m_latest.png"
     try:
         render_chart_png(chart_rows, image_path, 640, 640)
-        img = Image.open(image_path).convert("L").resize((image_size, image_size))
-        x = np.asarray(img, dtype=np.float32).reshape(1, -1) / 255.0
+        img_arr = plt.imread(str(image_path))
+        if img_arr.ndim == 3:
+            if img_arr.shape[2] >= 3:
+                rgb = img_arr[..., :3].astype(np.float32)
+                img_arr = (0.299 * rgb[..., 0] + 0.587 * rgb[..., 1] + 0.114 * rgb[..., 2]).astype(np.float32)
+            else:
+                img_arr = img_arr[..., 0].astype(np.float32)
+        else:
+            img_arr = img_arr.astype(np.float32)
+        if img_arr.max() > 1.5:
+            img_arr = img_arr / 255.0
+        src_h, src_w = img_arr.shape[:2]
+        y_idx = np.linspace(0, max(0, src_h - 1), image_size).astype(int)
+        x_idx = np.linspace(0, max(0, src_w - 1), image_size).astype(int)
+        resized = img_arr[np.ix_(y_idx, x_idx)]
+        x = resized.reshape(1, -1).astype(np.float32)
         prob = 0.0
         if isinstance(portable_model, dict):
             prob = score_portable_chart_model(portable_model, x)
@@ -2656,6 +2728,7 @@ def main() -> None:
     known_name_map: Dict[str, str] = {}
     manual_watch_symbols: set[str] = set()
     bought_symbols_today: set[str] = set()
+    traded_symbols_today: set[str] = set()
     limit_up_hold_day: Dict[str, datetime.date] = {}
     theme_selection_day = None
     daily_trade_finished_day = None
@@ -2795,6 +2868,9 @@ def main() -> None:
     for symbol in list(saved_state.get("bought_symbols_today", [])):
         if str(symbol).strip().isdigit():
             bought_symbols_today.add(str(symbol).strip().zfill(6))
+    for symbol in list(saved_state.get("traded_symbols_today", [])):
+        if str(symbol).strip().isdigit():
+            traded_symbols_today.add(str(symbol).strip().zfill(6))
     strict_filtered_count = max(0, _to_int(saved_state.get("strict_filtered_count")))
     try:
         raw_theme_selection_day = str(saved_state.get("theme_selection_day", "")).strip()
@@ -2828,6 +2904,7 @@ def main() -> None:
             limit_up_hold_day=limit_up_hold_day,
             watch_candidates=watch_candidates,
             bought_symbols_today=bought_symbols_today,
+            traded_symbols_today=traded_symbols_today,
             strict_filtered_count=strict_filtered_count,
             theme_selection_day=theme_selection_day,
             daily_trade_finished_day=daily_trade_finished_day,
@@ -2869,16 +2946,20 @@ def main() -> None:
         peak_price[symbol] = float(price)
         entry_time[symbol] = datetime.now(KST)
         bought_symbols_today.add(symbol)
+        traded_symbols_today.add(symbol)
         signal_first_seen_at.pop(symbol, None)
         persist_runtime_state()
 
     def clear_position_state(symbol: str) -> None:
         positions[symbol] = 0
+        traded_symbols_today.add(symbol)
         signal_first_seen_at.pop(symbol, None)
         entry_price.pop(symbol, None)
         peak_price.pop(symbol, None)
         entry_time.pop(symbol, None)
         limit_up_hold_day.pop(symbol, None)
+        watch_candidates[:] = [candidate for candidate in watch_candidates if candidate.symbol != symbol]
+        manual_watch_symbols.discard(symbol)
         persist_runtime_state()
 
     def finish_if_all_closed(carryover_exit: bool = False) -> None:
@@ -2907,7 +2988,7 @@ def main() -> None:
                 enriched.theme_name = "수동감시"
             return enriched
         except Exception as exc:
-            notifier.send(f"수동감시 즉시추가 실패 | {display_name(name, symbol)} | {type(exc).__name__}")
+            notifier.send(f"수동모니터링 즉시추가 실패 | {display_name(name, symbol)} | {type(exc).__name__}")
             return None
 
     def monitoring_preview() -> str:
@@ -2922,7 +3003,7 @@ def main() -> None:
                 names.append(nm)
         if not names:
             return "-"
-        return ", ".join(names[: max(1, int(args.max_watch_candidates))])
+        return ", ".join(names)
 
     def rebuild_manual_watch_candidates() -> List[Candidate]:
         rebuilt: List[Candidate] = []
@@ -3001,6 +3082,7 @@ def main() -> None:
                 continue
             if action == "buy":
                 for symbol, name in payload[:1]:
+                    sync_holdings_from_account(datetime.now(KST))
                     holding_count = sum(1 for q in positions.values() if q > 0)
                     if positions.get(symbol, 0) <= 0 and holding_count >= int(args.max_positions):
                         notifier.send(f"수동매수거부 | 보유 {holding_count}/{int(args.max_positions)}종목 | {display_name(name, symbol)}")
@@ -3074,6 +3156,7 @@ def main() -> None:
                 continue
             if action == "sell":
                 for symbol, name in payload[:1]:
+                    sync_holdings_from_account(datetime.now(KST))
                     qty = int(positions.get(symbol, 0))
                     if qty <= 0:
                         holdings = fetch_account_holdings(
@@ -3268,7 +3351,7 @@ def main() -> None:
 
     if manual_watch_symbols:
         merge_manual_watch_candidates()
-        notifier.send(f"수동감시 복원 | {monitoring_preview()}")
+        notifier.send(f"수동모니터링 복원 | {monitoring_preview()}")
         persist_runtime_state()
 
     boot_now = datetime.now(KST)
@@ -3289,6 +3372,7 @@ def main() -> None:
             theme_selection_day = None if not any(q > 0 for q in positions.values()) else theme_selection_day
             daily_trade_finished_day = None if daily_trade_finished_day != now.date() else daily_trade_finished_day
             bought_symbols_today.clear()
+            traded_symbols_today.clear()
             blocked_unbuyable_symbols.clear()
             if not any(q > 0 for q in positions.values()):
                 if first_cycle_boot:
@@ -3316,7 +3400,9 @@ def main() -> None:
             if slots_left <= 0:
                 # When slots are full, do not waste API calls on reselection; keep monitoring for exits.
                 if last_slots_full_notice_at is None or (now - last_slots_full_notice_at).total_seconds() >= 600:
-                    notifier.send(f"재선정중지: 보유 {holding_count}/{int(args.max_positions)}종목으로 감시만 진행")
+                    notifier.send(
+                        f"재선정생략 | 보유 {holding_count}/{int(args.max_positions)}종목 | 모니터링 최대 {int(args.max_watch_candidates)}종목 유지"
+                    )
                     last_slots_full_notice_at = now
                 last_refresh = now
                 need_refresh = False
@@ -3340,7 +3426,7 @@ def main() -> None:
                     last_refresh = now
                     need_refresh = False
                     manual_selection_requested = False
-                    notifier.send("재선정대기: 현재 감시 흐름 유지")
+                    notifier.send("재선정대기: 현재 모니터링 흐름 유지")
                 else:
                     notifier.send("후보군선정 시작" if hhmm < int(args.market_open_hhmm) else "종목선정 시작")
             if need_refresh:
@@ -3445,11 +3531,11 @@ def main() -> None:
                     notifier.send(f"테마선정 {len(theme_groups)}개")
                     for group in theme_groups:
                         notifier.send(f"테마그룹 | {format_theme_group(group)}")
-                    notifier.send(f"대장감시 {len(merged_watch)}개 | {watch_preview(merged_watch)}")
+                    notifier.send(f"대장모니터링 {len(merged_watch)}개 | {watch_preview(merged_watch)}")
                 watch_candidates = merged_watch
                 persist_runtime_state()
                 if watch_candidates:
-                    notifier.send(f"추적 {len(watch_candidates)}개 | {watch_preview(watch_candidates)}")
+                    notifier.send(f"모니터링등록 {len(watch_candidates)}개 | {watch_preview(watch_candidates)}")
                 last_refresh = datetime.now(KST)
                 manual_selection_requested = False
                 first_run_at_window_open = False
@@ -3521,54 +3607,9 @@ def main() -> None:
             close = rows[-1]["close"]
             has_pos = positions.get(c.symbol, 0) > 0
             if not has_pos:
-                timed_ok, timed_reason, timed_score = timed_buy_signal_from_minute_bars(
-                    rows,
-                    early_end_hhmm=args.early_momentum_end_hhmm,
-                    min_gain_pct=args.early_momentum_min_gain_pct,
-                    volume_mult=args.early_momentum_volume_mult,
-                )
-                early_ok, early_reason, early_score = early_momentum_buy_signal_from_minute_bars(
-                    rows,
-                    early_end_hhmm=args.early_momentum_end_hhmm,
-                    min_gain_pct=args.early_momentum_min_gain_pct,
-                    volume_mult=args.early_momentum_volume_mult,
-                )
-                buy_ok, buy_reason, buy_score = buy_signal_from_minute_bars(rows, adx_min=float(args.adx_min))
-                near_ok, near_reason, _near_score = near_buy_signal_from_minute_bars(rows, adx_min=float(args.adx_min))
-                brk_ok, brk_reason, brk_score = (False, "", -1.0)
-                if not args.disable_breakout_entry:
-                    brk_ok, brk_reason, brk_score = breakout_buy_signal_from_minute_bars(
-                        rows,
-                        lookback_bars=int(args.breakout_lookback_bars),
-                        breakout_buffer_pct=float(args.breakout_buffer_pct),
-                        volume_window=int(args.breakout_volume_window),
-                        volume_mult=float(args.breakout_volume_mult),
-                        adx_min=float(args.breakout_adx_min),
-                    )
-                if not early_ok and not buy_ok and not brk_ok and near_ok:
-                    last_notice = last_near_buy_notice_at.get(c.symbol)
-                    if last_notice is None or (now - last_notice).total_seconds() >= 600:
-                        notifier.send(f"매수근접 | {display_name(c.name, c.symbol)} | {near_reason}")
-                        last_near_buy_notice_at[c.symbol] = now
-                if not timed_ok and not early_ok and not buy_ok and not brk_ok:
+                if c.symbol in traded_symbols_today:
                     signal_first_seen_at.pop(c.symbol, None)
                     continue
-                last_near_buy_notice_at.pop(c.symbol, None)
-                chosen_score = buy_score
-                chosen_tag = f"기본:{buy_reason}"
-                if timed_ok and timed_score >= max(early_score, buy_score, brk_score):
-                    chosen_score = timed_score
-                    chosen_tag = f"시간대:{timed_reason}"
-                elif early_ok and early_score >= max(buy_score, brk_score):
-                    chosen_score = early_score
-                    chosen_tag = f"조기:{early_reason}"
-                elif brk_ok and brk_score >= buy_score:
-                    chosen_score = brk_score
-                    chosen_tag = f"돌파:{brk_reason}"
-                leader_bonus = min(60.0, max(0.0, float(c.leader_score)) * 0.12)
-                if c.theme_id > 0 and c.theme_name != "수동감시":
-                    chosen_score += leader_bonus
-                    chosen_tag = f"{chosen_tag} | 대장보너스={leader_bonus:.1f}"
                 chart_buy_threshold = resolve_intraday_chart_threshold(
                     now.hour * 100 + now.minute,
                     base_threshold=float(args.chart_classifier_threshold),
@@ -3586,9 +3627,20 @@ def main() -> None:
                     bonus_scale=float(args.chart_classifier_bonus_scale),
                     bar_minutes=int(args.bar_minutes),
                 )
-                if chart_bonus > 0:
-                    chosen_score += chart_bonus
-                chosen_tag = f"{chosen_tag} | {chart_reason}"
+                chart_buy_ok = bool(
+                    chart_classifier_payload
+                    and "차트점수=" in chart_reason
+                    and "off" not in chart_reason
+                    and "warmup" not in chart_reason
+                    and "fail(" not in chart_reason
+                    and "import_fail" not in chart_reason
+                    and chart_prob >= chart_buy_threshold
+                )
+                if not chart_buy_ok:
+                    signal_first_seen_at.pop(c.symbol, None)
+                    continue
+                chosen_score = chart_prob * 100.0 + max(0.0, chart_bonus)
+                chosen_tag = chart_reason
                 signal_at = signal_first_seen_at.setdefault(c.symbol, now)
                 signaled_this_cycle.add(c.symbol)
                 buy_candidates.append((signal_at, chosen_score, c, float(close), chosen_tag))
@@ -3649,28 +3701,66 @@ def main() -> None:
                     bonus_scale=10.0,
                     bar_minutes=int(args.bar_minutes),
                 )
-                chart_sell_ok = bool(
+                chart_sell_ready = bool(
                     sell_chart_classifier_payload
-                    and chart_sell_prob >= chart_sell_threshold
-                    and (profit_pct >= 0.003 or stop_loss_ok or trailing_ok or hold_time_ok)
+                    and "차트점수=" in chart_sell_reason
+                    and "off" not in chart_sell_reason
+                    and "warmup" not in chart_sell_reason
+                    and "fail(" not in chart_sell_reason
+                    and "import_fail" not in chart_sell_reason
                 )
-                final_sell_ok = bool(sell_ok or stop_loss_ok or trailing_ok or hold_time_ok or chart_sell_ok)
-                reason_parts: List[str] = []
-                if sell_ok:
+                chart_sell_strong_threshold = min(0.95, chart_sell_threshold + 0.12)
+                chart_sell_strong = bool(chart_sell_ready and chart_sell_prob >= chart_sell_strong_threshold)
+                chart_sell_weak = bool(chart_sell_ready and chart_sell_prob >= chart_sell_threshold)
+                chart_sell_neutral = bool(
+                    chart_sell_ready
+                    and not chart_sell_weak
+                    and chart_sell_prob >= max(0.05, chart_sell_threshold - 0.08)
+                )
+                chart_indicator_sell = bool(chart_sell_weak and sell_ok)
+                hold_time_sell = bool(hold_time_ok and chart_sell_weak)
+                final_sell_ok = bool(
+                    stop_loss_ok
+                    or chart_sell_strong
+                    or trailing_ok
+                    or chart_indicator_sell
+                    or hold_time_sell
+                )
+                reason_parts: List[str] = [f"차트:{chart_sell_reason}"]
+                if chart_sell_strong:
+                    reason_parts.append(f"차트붕괴강신호({chart_sell_prob:.2f}>={chart_sell_strong_threshold:.2f})")
+                elif chart_indicator_sell:
+                    reason_parts.append(f"차트약화+지표약화({chart_sell_prob:.2f}>={chart_sell_threshold:.2f})")
+                elif chart_sell_neutral:
+                    reason_parts.append("차트중립=유지")
+                elif sell_ok:
+                    reason_parts.append("지표약화단독=관찰")
+                if sell_ok and (chart_sell_strong or chart_indicator_sell):
                     reason_parts.append(f"지표:{sell_reason}")
-                if chart_sell_ok:
-                    reason_parts.append(f"차트:{chart_sell_reason}")
                 if stop_loss_ok:
                     reason_parts.append(f"손절(entry={ep:.0f},close={float(close):.0f})")
                 if trailing_ok:
                     reason_parts.append(f"트레일링(entry={ep:.0f},peak={pp:.0f},close={float(close):.0f},trail={trail_stop_pct*100:.1f}%)")
-                if hold_time_ok:
+                if hold_time_sell:
                     reason_parts.append(f"시간청산(hold={hold_min}m)")
                 final_sell_reason = " | ".join(reason_parts) if reason_parts else "no-sell"
                 if not final_sell_ok:
                     continue
+                sync_holdings_from_account(now)
                 qty = positions.get(c.symbol, 0)
                 if qty <= 0:
+                    qty = confirm_holding_qty(
+                        base_url=args.base_url,
+                        token=token,
+                        app_key=args.app_key,
+                        app_secret=args.app_secret,
+                        cano=args.cano,
+                        acnt_prdt_cd=args.acnt_prdt_cd,
+                        symbol=c.symbol,
+                    )
+                    positions[c.symbol] = max(0, int(qty))
+                if qty <= 0:
+                    clear_position_state(c.symbol)
                     continue
                 carryover_exit = c.symbol in limit_up_hold_day and limit_up_hold_day.get(c.symbol) != now.date()
                 if args.dry_run:
@@ -3759,7 +3849,7 @@ def main() -> None:
             buys_left = min(max(0, int(args.max_buys_per_scan)), slots_left)
             if buys_left <= 0:
                 if last_slots_full_notice_at is None or (now - last_slots_full_notice_at).total_seconds() >= 300:
-                    notifier.send(f"매수대기 | 보유 {holding_count}/{int(args.max_positions)}종목으로 감시만 진행")
+                    notifier.send(f"매수대기 | 보유 {holding_count}/{int(args.max_positions)}종목으로 모니터링만 진행")
                     last_slots_full_notice_at = now
                 if cycle + 1 < args.max_cycles:
                     sleep_with_telegram_poll(max(1, int(args.scan_interval_sec)))
@@ -3768,6 +3858,10 @@ def main() -> None:
                 # Priority: symbols whose buy signal appeared earlier are traded first.
                 ranked = sorted(buy_candidates, key=lambda x: (x[0], -x[1]))
                 for signal_at, score, c, close, buy_tag in ranked[:buys_left]:
+                    sync_holdings_from_account(now)
+                    holding_count = sum(1 for q in positions.values() if q > 0)
+                    if positions.get(c.symbol, 0) <= 0 and holding_count >= int(args.max_positions):
+                        continue
                     cooldown_until = order_cooldown_until.get(c.symbol)
                     if cooldown_until and now < cooldown_until:
                         continue
