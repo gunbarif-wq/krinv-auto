@@ -1739,6 +1739,8 @@ def parse_telegram_watch_command(text: str, known_name_map: Dict[str, str]) -> T
     monitor_key = re.sub(r"\s+", "", raw)
     if monitor_key == "종목선정":
         return "select", []
+    if monitor_key == "보유":
+        return "holdings", []
     if "모니터" in monitor_key:
         return "status", []
     parts = [item.strip() for item in re.split(r"[,\n]+", raw) if item.strip()]
@@ -1802,6 +1804,51 @@ def parse_telegram_watch_command(text: str, known_name_map: Dict[str, str]) -> T
     if resolved_watch:
         return "watch", resolved_watch
     return "ignore", []
+
+
+def format_holdings_report(
+    *,
+    base_url: str,
+    token: str,
+    app_key: str,
+    app_secret: str,
+    holdings: Dict[str, Dict[str, float | int | str]],
+    minute_market_code: str,
+    bar_minutes: int,
+) -> str:
+    if not holdings:
+        return "현재 보유종목 | -"
+    lines: List[str] = []
+    for symbol, row in sorted(holdings.items(), key=lambda item: str(item[1].get("name", item[0]))):
+        qty = int(row.get("qty", 0) or 0)
+        if qty <= 0:
+            continue
+        name = display_name(str(row.get("name", "")).strip(), symbol)
+        avg_price = float(row.get("avg_price", 0.0) or 0.0)
+        current_price = avg_price
+        try:
+            rows = fetch_minute_ohlcv(
+                base_url=base_url,
+                token=token,
+                app_key=app_key,
+                app_secret=app_secret,
+                symbol=symbol,
+                count_hint=raw_count_hint_for_resampled_bars(2, max(1, int(bar_minutes))),
+                market_code=minute_market_code,
+            )
+            bars = resample_bars(rows, bar_minutes=max(1, int(bar_minutes)))
+            if bars:
+                current_price = float(bars[-1]["close"])
+            elif rows:
+                current_price = float(rows[-1]["close"])
+        except Exception:
+            current_price = avg_price
+        pnl = (current_price - avg_price) * qty if avg_price > 0 else 0.0
+        pnl_text = f"{pnl:+,.0f}원"
+        lines.append(
+            f"{name} | 평가손익 {pnl_text} | 보유 {qty}주 | 매입단가 {avg_price:,.0f} | 현재가 {current_price:,.0f}"
+        )
+    return "\n".join(lines) if lines else "현재 보유종목 | -"
 
 
 def early_momentum_buy_signal_from_minute_bars(
@@ -3079,6 +3126,32 @@ def main() -> None:
             if action == "status":
                 current_watch = monitoring_preview()
                 notifier.send(f"현재 모니터링종목 | {current_watch}")
+                continue
+            if action == "holdings":
+                sync_holdings_from_account(datetime.now(KST))
+                try:
+                    holdings = fetch_account_holdings(
+                        base_url=args.base_url,
+                        token=token,
+                        app_key=args.app_key,
+                        app_secret=args.app_secret,
+                        cano=args.cano,
+                        acnt_prdt_cd=args.acnt_prdt_cd,
+                    )
+                except Exception as exc:
+                    notifier.send(f"보유조회실패 | {type(exc).__name__}")
+                    continue
+                notifier.send(
+                    format_holdings_report(
+                        base_url=args.base_url,
+                        token=token,
+                        app_key=args.app_key,
+                        app_secret=args.app_secret,
+                        holdings=holdings,
+                        minute_market_code=args.minute_market_code,
+                        bar_minutes=int(args.bar_minutes),
+                    )
+                )
                 continue
             if action == "buy":
                 for symbol, name in payload[:1]:
