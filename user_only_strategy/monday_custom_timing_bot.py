@@ -2609,7 +2609,7 @@ def main() -> None:
                 restored.theme_name = "수동보유"
                 if all(candidate.symbol != symbol for candidate in watch_candidates):
                     watch_candidates.append(restored)
-                notifier.send(f"수동보유 감지 | {display_name(restored.name, symbol)} {qty}주")
+                notifier.send(f"계좌보유 감지 | {display_name(restored.name, symbol)} {qty}주")
         if added_any:
             persist_symbol_name_map()
             persist_runtime_state()
@@ -2809,6 +2809,11 @@ def main() -> None:
             c.theme_name = "수동감시"
             rebuilt.append(c)
         return rebuilt
+
+    def merge_manual_watch_candidates() -> None:
+        for candidate in rebuild_manual_watch_candidates():
+            if all(existing.symbol != candidate.symbol for existing in watch_candidates):
+                watch_candidates.append(candidate)
 
     def drop_nonholding_after_close() -> None:
         keep_symbols = {s for s, q in positions.items() if q > 0}
@@ -3118,10 +3123,7 @@ def main() -> None:
             persist_runtime_state()
 
     if manual_watch_symbols:
-        restored_manual = rebuild_manual_watch_candidates()
-        for candidate in restored_manual:
-            if all(existing.symbol != candidate.symbol for existing in watch_candidates):
-                watch_candidates.append(candidate)
+        merge_manual_watch_candidates()
         notifier.send(f"수동감시 복원 | {monitoring_preview()}")
         persist_runtime_state()
 
@@ -3137,6 +3139,7 @@ def main() -> None:
         now = datetime.now(KST)
         hhmm = now.hour * 100 + now.minute
         if active_session_day != now.date():
+            first_cycle_boot = active_session_day is None
             active_session_day = now.date()
             close_notified_day = None
             theme_selection_day = None if not any(q > 0 for q in positions.values()) else theme_selection_day
@@ -3144,8 +3147,11 @@ def main() -> None:
             bought_symbols_today.clear()
             blocked_unbuyable_symbols.clear()
             if not any(q > 0 for q in positions.values()):
-                watch_candidates[:] = rebuild_manual_watch_candidates()
-                strict_filtered_count = 0
+                if first_cycle_boot:
+                    merge_manual_watch_candidates()
+                else:
+                    watch_candidates[:] = rebuild_manual_watch_candidates()
+                    strict_filtered_count = 0
         poll_telegram_commands(now)
         sync_holdings_from_account(now)
         if manual_selection_requested and not in_refresh_window(now, args.refresh_start_hhmm, args.refresh_end_hhmm):
