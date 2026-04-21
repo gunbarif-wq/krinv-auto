@@ -402,6 +402,94 @@ def fetch_account_holdings(
     return holdings
 
 
+def fetch_account_budget_info(
+    base_url: str,
+    token: str,
+    app_key: str,
+    app_secret: str,
+    cano: str,
+    acnt_prdt_cd: str,
+) -> Tuple[float, float]:
+    url = f"{base_url}/uapi/domestic-stock/v1/trading/inquire-balance"
+    headers = {
+        "authorization": f"Bearer {token}",
+        "appKey": app_key,
+        "appSecret": app_secret,
+        "tr_id": balance_inquiry_tr_id(base_url),
+        "custtype": "P",
+    }
+    params = {
+        "CANO": cano,
+        "ACNT_PRDT_CD": acnt_prdt_cd,
+        "AFHR_FLPR_YN": "N",
+        "OFL_YN": "",
+        "INQR_DVSN": "02",
+        "UNPR_DVSN": "01",
+        "FUND_STTL_ICLD_YN": "N",
+        "FNCG_AMT_AUTO_RDPT_YN": "N",
+        "PRCS_DVSN": "01",
+        "CTX_AREA_FK100": "",
+        "CTX_AREA_NK100": "",
+    }
+    data = request_json_with_retry("get", url, headers=headers, params=params, timeout=15, retries=2)
+    holdings_rows = data.get("output1", [])
+    summary_rows = data.get("output2", [])
+    available_cash = 0.0
+    total_equity = 0.0
+    if isinstance(summary_rows, list) and summary_rows:
+        row = summary_rows[0] if isinstance(summary_rows[0], dict) else {}
+        available_cash = max(
+            _to_float(row.get("dnca_tot_amt")),
+            _to_float(row.get("ord_psbl_cash")),
+            _to_float(row.get("prvs_rcdl_excc_amt")),
+        )
+        total_equity = max(
+            _to_float(row.get("tot_evlu_amt")),
+            _to_float(row.get("scts_evlu_amt")) + available_cash,
+            _to_float(row.get("tot_evlu_pfls_amt")) + _to_float(row.get("tot_pchs_amt")) + available_cash,
+        )
+    if total_equity <= 0 and isinstance(holdings_rows, list):
+        holdings_value = 0.0
+        for row in holdings_rows:
+            if not isinstance(row, dict):
+                continue
+            qty = _to_int(row.get("hldg_qty"))
+            if qty <= 0:
+                continue
+            holdings_value += max(_to_float(row.get("evlu_amt")), _to_float(row.get("pchs_amt")))
+        total_equity = holdings_value + available_cash
+    return max(0.0, available_cash), max(0.0, total_equity)
+
+
+def compute_order_budget_krw(
+    args: argparse.Namespace,
+    base_url: str,
+    token: str,
+    app_key: str,
+    app_secret: str,
+    cano: str,
+    acnt_prdt_cd: str,
+) -> float:
+    if float(args.order_krw) > 0:
+        return max(0.0, float(args.order_krw))
+    pct = min(1.0, max(0.0, float(args.position_size_pct)))
+    fallback_budget = max(0.0, float(args.initial_cash) * pct)
+    try:
+        available_cash, total_equity = fetch_account_budget_info(
+            base_url=base_url,
+            token=token,
+            app_key=app_key,
+            app_secret=app_secret,
+            cano=cano,
+            acnt_prdt_cd=acnt_prdt_cd,
+        )
+    except Exception:
+        return fallback_budget
+    if total_equity <= 0:
+        return min(available_cash, fallback_budget) if available_cash > 0 else fallback_budget
+    return max(0.0, min(available_cash, total_equity * pct))
+
+
 def fetch_ranking_rows(
     base_url: str,
     token: str,
@@ -2871,10 +2959,15 @@ def main() -> None:
                     if close <= 0:
                         notifier.send(f"수동매수실패 | 현재가 확인불가 | {display_name(name, symbol)}")
                         continue
-                    if float(args.order_krw) > 0:
-                        budget = float(args.order_krw)
-                    else:
-                        budget = max(0.0, float(args.initial_cash) * min(1.0, max(0.0, float(args.position_size_pct))))
+                    budget = compute_order_budget_krw(
+                        args=args,
+                        base_url=args.base_url,
+                        token=token,
+                        app_key=args.app_key,
+                        app_secret=args.app_secret,
+                        cano=args.cano,
+                        acnt_prdt_cd=args.acnt_prdt_cd,
+                    )
                     qty = int(max(0.0, budget) // max(1.0, close))
                     if qty <= 0:
                         notifier.send(f"수동매수실패 | 수량0 | {display_name(name, symbol)}")
@@ -3616,10 +3709,15 @@ def main() -> None:
                     cooldown_until = order_cooldown_until.get(c.symbol)
                     if cooldown_until and now < cooldown_until:
                         continue
-                    if float(args.order_krw) > 0:
-                        budget = float(args.order_krw)
-                    else:
-                        budget = max(0.0, float(args.initial_cash) * min(1.0, max(0.0, float(args.position_size_pct))))
+                    budget = compute_order_budget_krw(
+                        args=args,
+                        base_url=args.base_url,
+                        token=token,
+                        app_key=args.app_key,
+                        app_secret=args.app_secret,
+                        cano=args.cano,
+                        acnt_prdt_cd=args.acnt_prdt_cd,
+                    )
                     qty = int(max(0.0, budget) // max(1.0, close))
                     if qty <= 0:
                         notifier.send(f"매수스킵 {display_name(c.name, c.symbol)} 수량0")
