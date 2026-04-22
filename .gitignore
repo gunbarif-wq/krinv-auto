@@ -3,4 +3,4 @@
 .env
 .kis_token_cache.json
 data/
-logs/
+logs/user_only_strategy/krx_symbol_names.json
