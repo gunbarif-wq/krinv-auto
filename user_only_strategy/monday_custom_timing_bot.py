@@ -15,6 +15,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Callable, Dict, List, Tuple
 
+import matplotlib.pyplot as plt
 import numpy as np
 import requests
 from zoneinfo import ZoneInfo
