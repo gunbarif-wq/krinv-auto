@@ -67,6 +67,18 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--horizon-bars", type=int, default=15)
     p.add_argument("--out-root", default="data/chart_retrain")
     p.add_argument("--model-name", default="", help="override model basename")
+    p.add_argument(
+        "--preferred-model",
+        default="",
+        choices=["", "logistic_raw", "pca_logistic", "pca_random_forest", "pca_gradient_boosting", "pca_catboost"],
+        help="forward to train_chart_image_classifier.py",
+    )
+    p.add_argument(
+        "--preferred-threshold",
+        type=float,
+        default=-1.0,
+        help="forward to train_chart_image_classifier.py",
+    )
     p.add_argument("--pause-ms", type=int, default=380)
     p.add_argument("--max-bars-per-day", type=int, default=450)
     p.add_argument("--retry-count", type=int, default=2, help="retries per business day fetch")
@@ -76,6 +88,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--fetch-only", action="store_true", help="only fetch raw minute data and summary, skip image build/train")
     p.add_argument("--symbol-offset", type=int, default=0, help="start index within selected symbols (for parallel shard runs)")
     p.add_argument("--symbol-limit", type=int, default=0, help="max number of selected symbols to process from offset (0=all)")
+    p.add_argument("--reuse-raw-root", default="", help="reuse an existing raw_1m directory instead of fetching again")
+    p.add_argument("--offline-raw", action=argparse.BooleanOptionalAction, default=False, help="use existing raw CSVs only and do not fetch missing days")
+    p.add_argument("--resume", action=argparse.BooleanOptionalAction, default=True, help="reuse existing per-symbol datasets when present")
     return p.parse_args()
 
 
@@ -365,6 +380,22 @@ def combine_metadata(per_symbol_root: Path, combined_dir: Path) -> Dict[str, int
     return {"rows": len(merged_rows), "label0": counts.get(0, 0), "label1": counts.get(1, 0)}
 
 
+def load_existing_symbol_stats(symbol_out: Path) -> Dict[str, int] | None:
+    meta_path = symbol_out / "metadata.csv"
+    if not meta_path.exists():
+        return None
+    counts = Counter()
+    rows = 0
+    with meta_path.open("r", encoding="utf-8") as f:
+        for row in csv.DictReader(f):
+            try:
+                counts[int(row["label"])] += 1
+                rows += 1
+            except Exception:
+                continue
+    return {"images": rows, "label0": counts.get(0, 0), "label1": counts.get(1, 0)}
+
+
 def main() -> None:
     load_dotenv(str(ROOT / ".env"))
     args = parse_args()
@@ -421,6 +452,7 @@ def main() -> None:
     raw_root = out_root / "raw_1m"
     per_symbol_root = out_root / "per_symbol"
     combined_dir = out_root / "combined"
+    reuse_raw_root = Path(args.reuse_raw_root).resolve() if str(args.reuse_raw_root).strip() else None
     model_out = ROOT / "data" / "chart_models" / f"{run_name}.pkl"
     report_out = ROOT / "data" / "chart_models" / f"{run_name}.report.json"
 
@@ -437,76 +469,79 @@ def main() -> None:
 
     for idx, (symbol, name) in enumerate(picked, start=1):
         raw_csv = raw_root / f"{symbol}_1m.csv"
-        if args.fetch_only and csv_unique_days(raw_csv) >= max(1, fetch_bdays - 1):
+        source_csv = (reuse_raw_root / f"{symbol}_1m.csv") if reuse_raw_root else raw_csv
+        existing_csv = raw_csv if raw_csv.exists() else source_csv
+        if args.fetch_only and csv_unique_days(existing_csv) >= max(1, fetch_bdays - 1):
             summary["per_symbol"][symbol] = {"name": name, "rows_1m": -1, "images": 0, "label0": 0, "label1": 0, "skipped_existing": True}
             print(f"[{idx}/{len(picked)}] {symbol} {name} skip_existing")
             continue
-        existing_rows = load_existing_csv_rows(raw_csv) if args.fetch_only else []
+        existing_rows = load_existing_csv_rows(existing_csv) if existing_csv.exists() else []
         existing_days = csv_day_set(existing_rows)
         all_rows: List[Dict[str, str]] = list(existing_rows)
         day_errors = 0
         consecutive_day_errors = 0
-        remaining_days = [ymd for ymd in ymd_list if ymd not in existing_days]
+        remaining_days = [] if args.offline_raw else [ymd for ymd in ymd_list if ymd not in existing_days]
         print(f"[{idx}/{len(picked)}] {symbol} {name} start remaining_days={len(remaining_days)} existing_days={len(existing_days)}")
-        for ymd in remaining_days:
-            last_exc: Exception | None = None
-            day_rows: List[Dict[str, str]] = []
-            for attempt in range(max(1, int(args.retry_count))):
-                try:
-                    day_rows = fetch_one_day_1m(
-                        app_key=args.app_key,
-                        app_secret=args.app_secret,
-                        token=token,
-                        symbol=symbol,
-                        yyyymmdd=ymd,
-                        max_bars_per_day=int(args.max_bars_per_day),
-                        pause_ms=int(args.pause_ms),
-                        base_url=quote_base_url,
-                    )
-                    if not day_rows and fetch_bdays > 1:
-                        day_rows = fetch_one_day_1m_10230(
+        if remaining_days:
+            for ymd in remaining_days:
+                last_exc: Exception | None = None
+                day_rows: List[Dict[str, str]] = []
+                for attempt in range(max(1, int(args.retry_count))):
+                    try:
+                        day_rows = fetch_one_day_1m(
                             app_key=args.app_key,
                             app_secret=args.app_secret,
                             token=token,
                             symbol=symbol,
                             yyyymmdd=ymd,
+                            max_bars_per_day=int(args.max_bars_per_day),
                             pause_ms=int(args.pause_ms),
-                            max_rows=int(args.max_bars_per_day),
                             base_url=quote_base_url,
                         )
-                    break
-                except Exception as exc:
-                    last_exc = exc
-                    if _is_token_expired_error(exc):
-                        token = get_access_token(args.app_key, args.app_secret, base_url=quote_base_url)
-                        time.sleep(1.2)
-                        continue
-                    if _is_rate_limit_error(exc):
-                        time.sleep(2.5 * (attempt + 1))
-                        continue
-                    if _is_transient_network_error(exc):
-                        time.sleep(3.0 * (attempt + 1))
-                        continue
-                    time.sleep(0.8)
-                    break
-            if day_rows:
-                all_rows.extend(day_rows)
-                consecutive_day_errors = 0
-                if args.fetch_only:
-                    dedup_partial = {r["date"]: r for r in all_rows}
-                    rows_partial = [dedup_partial[k] for k in sorted(dedup_partial.keys())]
-                    write_csv(raw_csv, rows_partial)
-                    print(f"[day] {symbol} {ymd} rows={len(day_rows)} total_rows={len(rows_partial)}")
-            elif last_exc is not None:
-                day_errors += 1
-                consecutive_day_errors += 1
-                print(f"[warn] {symbol} {ymd} {type(last_exc).__name__}: {last_exc}")
-                if day_errors >= max(1, int(args.max_day_errors_per_symbol)):
-                    print(f"[skip] {symbol} too_many_day_errors={day_errors}")
-                    break
-                if consecutive_day_errors >= max(1, int(args.max_consecutive_day_errors)):
-                    print(f"[skip] {symbol} consecutive_day_errors={consecutive_day_errors}")
-                    break
+                        if not day_rows and fetch_bdays > 1:
+                            day_rows = fetch_one_day_1m_10230(
+                                app_key=args.app_key,
+                                app_secret=args.app_secret,
+                                token=token,
+                                symbol=symbol,
+                                yyyymmdd=ymd,
+                                pause_ms=int(args.pause_ms),
+                                max_rows=int(args.max_bars_per_day),
+                                base_url=quote_base_url,
+                            )
+                        break
+                    except Exception as exc:
+                        last_exc = exc
+                        if _is_token_expired_error(exc):
+                            token = get_access_token(args.app_key, args.app_secret, base_url=quote_base_url)
+                            time.sleep(1.2)
+                            continue
+                        if _is_rate_limit_error(exc):
+                            time.sleep(2.5 * (attempt + 1))
+                            continue
+                        if _is_transient_network_error(exc):
+                            time.sleep(3.0 * (attempt + 1))
+                            continue
+                        time.sleep(0.8)
+                        break
+                if day_rows:
+                    all_rows.extend(day_rows)
+                    consecutive_day_errors = 0
+                    if args.fetch_only:
+                        dedup_partial = {r["date"]: r for r in all_rows}
+                        rows_partial = [dedup_partial[k] for k in sorted(dedup_partial.keys())]
+                        write_csv(raw_csv, rows_partial)
+                        print(f"[day] {symbol} {ymd} rows={len(day_rows)} total_rows={len(rows_partial)}")
+                elif last_exc is not None:
+                    day_errors += 1
+                    consecutive_day_errors += 1
+                    print(f"[warn] {symbol} {ymd} {type(last_exc).__name__}: {last_exc}")
+                    if day_errors >= max(1, int(args.max_day_errors_per_symbol)):
+                        print(f"[skip] {symbol} too_many_day_errors={day_errors}")
+                        break
+                    if consecutive_day_errors >= max(1, int(args.max_consecutive_day_errors)):
+                        print(f"[skip] {symbol} consecutive_day_errors={consecutive_day_errors}")
+                        break
         dedup = {r["date"]: r for r in all_rows}
         rows_1m = [dedup[k] for k in sorted(dedup.keys())]
         if not rows_1m:
@@ -522,6 +557,16 @@ def main() -> None:
             (out_root / "summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
             continue
         symbol_out = per_symbol_root / symbol
+        if args.resume:
+            existing_stats = load_existing_symbol_stats(symbol_out)
+            if existing_stats is not None:
+                existing_stats["rows_1m"] = len(rows_1m)
+                existing_stats["name"] = name
+                summary["per_symbol"][symbol] = existing_stats
+                print(f"[{idx}/{len(picked)}] {symbol} {name} reuse_existing images={existing_stats['images']} pos={existing_stats['label1']}")
+                out_root.mkdir(parents=True, exist_ok=True)
+                (out_root / "summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
+                continue
         stats = build_symbol_dataset(
             rows_1m,
             symbol,
@@ -566,7 +611,13 @@ def main() -> None:
             str(model_out),
             "--report-out",
             str(report_out),
+            "--target-side",
+            str(args.target_side),
         ]
+        if str(args.preferred_model or "").strip():
+            sys.argv.extend(["--preferred-model", str(args.preferred_model)])
+        if float(args.preferred_threshold) > 0:
+            sys.argv.extend(["--preferred-threshold", str(float(args.preferred_threshold))])
         train_classifier_main()
     finally:
         sys.argv = old_argv

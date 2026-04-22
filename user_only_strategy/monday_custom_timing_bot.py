@@ -1263,6 +1263,25 @@ def resolve_chart_model_path(primary_text: str, fallback_relpath: str) -> str:
     return ""
 
 
+def resolve_payload_preferred_threshold(
+    payload: Dict[str, object] | None,
+    cli_value: float,
+    default_value: float,
+) -> float:
+    resolved = float(cli_value)
+    if abs(resolved - float(default_value)) > 1e-9:
+        return resolved
+    if not payload:
+        return resolved
+    try:
+        preferred = float(payload.get("preferred_threshold", 0.0) or 0.0)
+    except Exception:
+        preferred = 0.0
+    if preferred > 0:
+        return preferred
+    return resolved
+
+
 def score_chart_classifier_bonus(
     rows: List[Dict[str, float]],
     payload: Dict[str, object] | None,
@@ -2369,6 +2388,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--sell-chart-classifier-threshold", type=float, default=float(os.getenv("SELL_CHART_CLASSIFIER_THRESHOLD", "0.55")))
     p.add_argument("--sell-chart-classifier-threshold-morning", type=float, default=float(os.getenv("SELL_CHART_CLASSIFIER_THRESHOLD_MORNING", os.getenv("SELL_CHART_CLASSIFIER_THRESHOLD", "0.55"))))
     p.add_argument("--sell-chart-classifier-threshold-afternoon", type=float, default=float(os.getenv("SELL_CHART_CLASSIFIER_THRESHOLD_AFTERNOON", str(max(0.05, float(os.getenv('SELL_CHART_CLASSIFIER_THRESHOLD', '0.55')) - 0.03)))))
+    p.add_argument("--sell-chart-weight", type=float, default=float(os.getenv("SELL_CHART_WEIGHT", "0.70")))
+    p.add_argument("--auto-selection-enabled", action=argparse.BooleanOptionalAction, default=True, help="auto start theme selection at --auto-selection-hhmm")
+    p.add_argument("--auto-selection-hhmm", type=int, default=int(os.getenv("AUTO_SELECTION_HHMM", "801")))
+    p.add_argument("--auto-selection-retry-min", type=int, default=int(os.getenv("AUTO_SELECTION_RETRY_MIN", "10")))
     p.add_argument("--chart-threshold-morning-end-hhmm", type=int, default=int(os.getenv("CHART_THRESHOLD_MORNING_END_HHMM", "1030")))
     p.add_argument("--chart-threshold-afternoon-start-hhmm", type=int, default=int(os.getenv("CHART_THRESHOLD_AFTERNOON_START_HHMM", "1300")))
     return p.parse_args()
@@ -2657,9 +2680,9 @@ def breakout_buy_signal_from_minute_bars(
     return True, reason, score
 
 
-def sell_signal_from_minute_bars(rows: List[Dict[str, float]]) -> Tuple[bool, str]:
+def sell_signal_from_minute_bars(rows: List[Dict[str, float]]) -> Tuple[bool, str, float]:
     if len(rows) < 70:
-        return False, "warmup"
+        return False, "warmup", 0.0
     high = np.asarray([r["high"] for r in rows], dtype=float)
     low = np.asarray([r["low"] for r in rows], dtype=float)
     close = np.asarray([r["close"] for r in rows], dtype=float)
@@ -2730,11 +2753,20 @@ def sell_signal_from_minute_bars(rows: List[Dict[str, float]]) -> Tuple[bool, st
     )
     raw_sell = (impulse_dead and (stoch_dead or dmi_dead)) or (ma20_break and (rsi_mid_break or impulse_dead))
     ok = raw_sell and not strong_trend_hold
+    score = 0.0
+    score += 0.18 if stoch_dead else 0.0
+    score += 0.22 if dmi_dead else 0.0
+    score += 0.18 if impulse_dead else 0.0
+    score += 0.18 if rsi_mid_break else 0.0
+    score += 0.24 if ma20_break else 0.0
+    if strong_trend_hold:
+        score *= 0.35
+    score = max(0.0, min(1.0, score))
     reason = (
         f"stoch_dead={stoch_dead} dmi_dead={dmi_dead} impulse_dead={impulse_dead} "
         f"rsi_mid_break={rsi_mid_break} ma20_break={ma20_break} strong_trend_hold={strong_trend_hold}"
     )
-    return ok, reason
+    return ok, reason, score
 
 
 def main() -> None:
@@ -2762,6 +2794,36 @@ def main() -> None:
     )
     chart_classifier_payload, buy_chart_model_status = inspect_chart_classifier_payload(buy_chart_model_path)
     sell_chart_classifier_payload, sell_chart_model_status = inspect_chart_classifier_payload(sell_chart_model_path)
+    buy_chart_threshold_base = resolve_payload_preferred_threshold(
+        chart_classifier_payload,
+        float(args.chart_classifier_threshold),
+        0.50,
+    )
+    buy_chart_threshold_morning = resolve_payload_preferred_threshold(
+        chart_classifier_payload,
+        float(args.chart_classifier_threshold_morning),
+        0.50,
+    )
+    buy_chart_threshold_afternoon = resolve_payload_preferred_threshold(
+        chart_classifier_payload,
+        float(args.chart_classifier_threshold_afternoon),
+        0.54,
+    )
+    sell_chart_threshold_base = resolve_payload_preferred_threshold(
+        sell_chart_classifier_payload,
+        float(args.sell_chart_classifier_threshold),
+        0.55,
+    )
+    sell_chart_threshold_morning = resolve_payload_preferred_threshold(
+        sell_chart_classifier_payload,
+        float(args.sell_chart_classifier_threshold_morning),
+        0.55,
+    )
+    sell_chart_threshold_afternoon = resolve_payload_preferred_threshold(
+        sell_chart_classifier_payload,
+        float(args.sell_chart_classifier_threshold_afternoon),
+        0.52,
+    )
     chart_classifier_cache_dir = ROOT / "logs" / "chart_classifier_cache_buy"
     sell_chart_classifier_cache_dir = ROOT / "logs" / "chart_classifier_cache_sell"
     if chart_classifier_payload:
@@ -2800,6 +2862,7 @@ def main() -> None:
     telegram_update_offset = 0
     last_telegram_poll_at: datetime | None = None
     manual_selection_requested = False
+    next_auto_selection_at: datetime | None = None
     last_slots_full_notice_at: datetime | None = None
     signal_first_seen_at: Dict[str, datetime] = {}
     last_near_buy_notice_at: Dict[str, datetime] = {}
@@ -3519,6 +3582,19 @@ def main() -> None:
                     strict_filtered_count = 0
         poll_telegram_commands(now)
         sync_holdings_from_account(now)
+
+        # Auto theme-selection schedule:
+        # - Start at 08:01 (or configured) once per day.
+        # - If no leader is found, retry every N minutes until success.
+        if args.auto_selection_enabled and now.weekday() < 5:
+            auto_hhmm = int(args.auto_selection_hhmm)
+            retry_min = max(1, int(args.auto_selection_retry_min))
+            if theme_selection_day != now.date() and hhmm >= auto_hhmm:
+                if next_auto_selection_at is None:
+                    next_auto_selection_at = now
+                if now >= next_auto_selection_at:
+                    manual_selection_requested = True
+
         if manual_selection_requested and not in_refresh_window(now, args.refresh_start_hhmm, args.refresh_end_hhmm):
             if hhmm < int(args.refresh_start_hhmm):
                 notifier.send(f"종목선정대기 | {int(args.refresh_start_hhmm):04d} 이후 실행")
@@ -3543,6 +3619,7 @@ def main() -> None:
                     last_slots_full_notice_at = now
                 last_refresh = now
                 need_refresh = False
+                manual_selection_requested = False
             if need_refresh:
                 active_watch_symbols = {c.symbol for c in watch_candidates}
                 nonholding_watch_count = sum(
@@ -3657,6 +3734,10 @@ def main() -> None:
                 merged_watch: List[Candidate] = rebuild_manual_watch_candidates()
                 if not leaders:
                     notifier.send("테마대장 선정 없음")
+                    # Schedule next auto retry (if enabled).
+                    if bool(args.auto_selection_enabled):
+                        retry_min = max(1, int(args.auto_selection_retry_min))
+                        next_auto_selection_at = now + timedelta(minutes=retry_min)
                 else:
                     for leader in leaders:
                         if len(merged_watch) >= max(1, int(args.max_watch_candidates)):
@@ -3669,6 +3750,7 @@ def main() -> None:
                     for group in theme_groups:
                         notifier.send(f"테마그룹 | {format_theme_group(group)}")
                     notifier.send(f"대장모니터링 {len(merged_watch)}개 | {watch_preview_with_chart_scores(merged_watch)}")
+                    next_auto_selection_at = None
                 watch_candidates = merged_watch
                 persist_runtime_state()
                 if watch_candidates:
@@ -3749,9 +3831,9 @@ def main() -> None:
                     continue
                 chart_buy_threshold = resolve_intraday_chart_threshold(
                     now.hour * 100 + now.minute,
-                    base_threshold=float(args.chart_classifier_threshold),
-                    morning_threshold=float(args.chart_classifier_threshold_morning),
-                    afternoon_threshold=float(args.chart_classifier_threshold_afternoon),
+                    base_threshold=buy_chart_threshold_base,
+                    morning_threshold=buy_chart_threshold_morning,
+                    afternoon_threshold=buy_chart_threshold_afternoon,
                     morning_end_hhmm=int(args.chart_threshold_morning_end_hhmm),
                     afternoon_start_hhmm=int(args.chart_threshold_afternoon_start_hhmm),
                 )
@@ -3800,7 +3882,7 @@ def main() -> None:
                 hold_due_limit_today = limit_up_hold_day.get(c.symbol) == now.date()
                 if hold_due_limit_today:
                     continue
-                sell_ok, sell_reason = sell_signal_from_minute_bars(rows)
+                sell_ok, sell_reason, sell_signal_score = sell_signal_from_minute_bars(rows)
                 ep = float(entry_price.get(c.symbol, close))
                 pp = max(float(peak_price.get(c.symbol, ep)), float(close))
                 peak_price[c.symbol] = pp
@@ -3824,9 +3906,9 @@ def main() -> None:
                     hold_time_ok = False
                 chart_sell_threshold = resolve_intraday_chart_threshold(
                     now.hour * 100 + now.minute,
-                    base_threshold=float(args.sell_chart_classifier_threshold),
-                    morning_threshold=float(args.sell_chart_classifier_threshold_morning),
-                    afternoon_threshold=float(args.sell_chart_classifier_threshold_afternoon),
+                    base_threshold=sell_chart_threshold_base,
+                    morning_threshold=sell_chart_threshold_morning,
+                    afternoon_threshold=sell_chart_threshold_afternoon,
                     morning_end_hhmm=int(args.chart_threshold_morning_end_hhmm),
                     afternoon_start_hhmm=int(args.chart_threshold_afternoon_start_hhmm),
                 )
@@ -3848,7 +3930,9 @@ def main() -> None:
                     and "fail(" not in chart_sell_reason
                     and "import_fail" not in chart_sell_reason
                 )
-                chart_sell_weak_threshold = min(0.95, chart_sell_threshold + 0.06)
+                sell_chart_weight = max(0.0, min(1.0, float(args.sell_chart_weight)))
+                indicator_sell_weight = max(0.0, 1.0 - sell_chart_weight)
+                chart_sell_weak_threshold = min(0.95, chart_sell_threshold)
                 chart_sell_strong_threshold = min(0.95, chart_sell_threshold + 0.18)
                 chart_sell_strong = bool(chart_sell_ready and chart_sell_prob >= chart_sell_strong_threshold)
                 chart_sell_weak = bool(chart_sell_ready and chart_sell_prob >= chart_sell_weak_threshold)
@@ -3857,7 +3941,9 @@ def main() -> None:
                     and not chart_sell_weak
                     and chart_sell_prob >= max(0.05, chart_sell_threshold - 0.08)
                 )
-                chart_indicator_sell = bool(chart_sell_weak and sell_ok)
+                combined_sell_score = (chart_sell_prob * sell_chart_weight) + (sell_signal_score * indicator_sell_weight)
+                weighted_sell_ok = bool(chart_sell_weak and combined_sell_score >= chart_sell_threshold)
+                chart_indicator_sell = bool(chart_sell_weak and sell_ok and weighted_sell_ok)
                 hold_time_sell = bool(hold_time_ok and chart_sell_weak)
                 final_sell_ok = bool(
                     stop_loss_ok
@@ -3866,11 +3952,16 @@ def main() -> None:
                     or chart_indicator_sell
                     or hold_time_sell
                 )
-                reason_parts: List[str] = [f"차트:{chart_sell_reason}"]
+                reason_parts: List[str] = [
+                    f"차트:{chart_sell_reason}",
+                    f"매도결합={combined_sell_score:.2f}(차트{sell_chart_weight:.2f}+지표{indicator_sell_weight:.2f})",
+                ]
                 if chart_sell_strong:
                     reason_parts.append(f"차트붕괴강신호({chart_sell_prob:.2f}>={chart_sell_strong_threshold:.2f})")
                 elif chart_indicator_sell:
-                    reason_parts.append(f"차트약화+지표약화({chart_sell_prob:.2f}>={chart_sell_weak_threshold:.2f})")
+                    reason_parts.append(
+                        f"차트약화+지표약화({chart_sell_prob:.2f}>={chart_sell_weak_threshold:.2f},지표={sell_signal_score:.2f})"
+                    )
                 elif chart_sell_neutral:
                     reason_parts.append("차트중립=유지")
                 elif sell_ok:
