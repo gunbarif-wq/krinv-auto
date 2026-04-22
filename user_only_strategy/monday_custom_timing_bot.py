@@ -2412,6 +2412,11 @@ def in_refresh_window(now: datetime, start_hhmm: int, end_hhmm: int) -> bool:
     return now.weekday() < 5 and int(start_hhmm) <= hhmm < int(end_hhmm)
 
 
+def in_call_auction_window(now: datetime) -> bool:
+    hhmm = now.hour * 100 + now.minute
+    return now.weekday() < 5 and ((830 <= hhmm < 900) or (1520 <= hhmm < 1530))
+
+
 def is_network_block_error(exc: Exception) -> bool:
     s = f"{type(exc).__name__} {exc}".lower()
     return (
@@ -3219,6 +3224,7 @@ def main() -> None:
                             continue
                         raise
                     ok = str(res.get("rt_cd", "")) == "0"
+                    in_auction = in_call_auction_window(now_local)
                     if ok:
                         odno = str(res.get("output", {}).get("ODNO", "")).strip()
                         notifier.send(f"수동매수주문 {display_name(name, symbol)} {qty}주 {close:.0f}원 | 주문번호:{odno}")
@@ -3244,9 +3250,15 @@ def main() -> None:
                             persist_runtime_state()
                             notifier.send(f"수동매수체결 {display_name(name, symbol)} {filled_qty}/{max(ord_qty, qty)}주")
                         else:
-                            notifier.send(f"수동매수미체결 {display_name(name, symbol)} {filled_qty}/{max(ord_qty, qty)}주 | 주문번호:{odno}")
+                            if in_auction:
+                                notifier.send(f"수동매수동시호가대기 {display_name(name, symbol)} {filled_qty}/{max(ord_qty, qty)}주 | 주문번호:{odno}")
+                            else:
+                                notifier.send(f"수동매수미체결 {display_name(name, symbol)} {filled_qty}/{max(ord_qty, qty)}주 | 주문번호:{odno}")
                     else:
-                        notifier.send(f"수동매수실패 {display_name(name, symbol)} {qty}주 {close:.0f}원 | {format_kis_error(res)}")
+                        if in_auction:
+                            notifier.send(f"수동매수동시호가대기 {display_name(name, symbol)} {qty}주 {close:.0f}원 | {format_kis_error(res)}")
+                        else:
+                            notifier.send(f"수동매수실패 {display_name(name, symbol)} {qty}주 {close:.0f}원 | {format_kis_error(res)}")
                 continue
             if action == "sell":
                 for symbol, name in payload[:1]:
@@ -3287,6 +3299,7 @@ def main() -> None:
                             continue
                         raise
                     ok = str(res.get("rt_cd", "")) == "0"
+                    in_auction = in_call_auction_window(now_local)
                     if ok:
                         odno = str(res.get("output", {}).get("ODNO", "")).strip()
                         notifier.send(f"수동매도주문 {display_name(name, symbol)} {qty}주 {close:.0f}원 | 주문번호:{odno}")
@@ -3324,9 +3337,15 @@ def main() -> None:
                                 persist_runtime_state()
                             notifier.send(f"수동매도체결 {display_name(name, symbol)} {filled_qty}/{max(ord_qty, qty)}주")
                         else:
-                            notifier.send(f"수동매도미체결 {display_name(name, symbol)} {filled_qty}/{max(ord_qty, qty)}주 | 주문번호:{odno}")
+                            if in_auction:
+                                notifier.send(f"수동매도동시호가대기 {display_name(name, symbol)} {filled_qty}/{max(ord_qty, qty)}주 | 주문번호:{odno}")
+                            else:
+                                notifier.send(f"수동매도미체결 {display_name(name, symbol)} {filled_qty}/{max(ord_qty, qty)}주 | 주문번호:{odno}")
                     else:
-                        notifier.send(f"수동매도실패 {display_name(name, symbol)} {qty}주 | {format_kis_error(res)}")
+                        if in_auction:
+                            notifier.send(f"수동매도동시호가대기 {display_name(name, symbol)} {qty}주 | {format_kis_error(res)}")
+                        else:
+                            notifier.send(f"수동매도실패 {display_name(name, symbol)} {qty}주 | {format_kis_error(res)}")
                 continue
             if action == "unwatch":
                 for symbol, name in payload:
@@ -3804,9 +3823,10 @@ def main() -> None:
                     and "fail(" not in chart_sell_reason
                     and "import_fail" not in chart_sell_reason
                 )
-                chart_sell_strong_threshold = min(0.95, chart_sell_threshold + 0.12)
+                chart_sell_weak_threshold = min(0.95, chart_sell_threshold + 0.06)
+                chart_sell_strong_threshold = min(0.95, chart_sell_threshold + 0.18)
                 chart_sell_strong = bool(chart_sell_ready and chart_sell_prob >= chart_sell_strong_threshold)
-                chart_sell_weak = bool(chart_sell_ready and chart_sell_prob >= chart_sell_threshold)
+                chart_sell_weak = bool(chart_sell_ready and chart_sell_prob >= chart_sell_weak_threshold)
                 chart_sell_neutral = bool(
                     chart_sell_ready
                     and not chart_sell_weak
@@ -3825,7 +3845,7 @@ def main() -> None:
                 if chart_sell_strong:
                     reason_parts.append(f"차트붕괴강신호({chart_sell_prob:.2f}>={chart_sell_strong_threshold:.2f})")
                 elif chart_indicator_sell:
-                    reason_parts.append(f"차트약화+지표약화({chart_sell_prob:.2f}>={chart_sell_threshold:.2f})")
+                    reason_parts.append(f"차트약화+지표약화({chart_sell_prob:.2f}>={chart_sell_weak_threshold:.2f})")
                 elif chart_sell_neutral:
                     reason_parts.append("차트중립=유지")
                 elif sell_ok:
@@ -3882,6 +3902,7 @@ def main() -> None:
                             continue
                         raise
                     ok = str(res.get("rt_cd", "")) == "0"
+                    in_auction = in_call_auction_window(now)
                     if ok:
                         odno = str(res.get("output", {}).get("ODNO", "")).strip()
                         notifier.send(f"매도주문접수 {display_name(c.name, c.symbol)} {qty}주 {close:.0f}원 | 주문번호:{odno} | {final_sell_reason}")
@@ -3928,9 +3949,15 @@ def main() -> None:
                                 clear_position_state(c.symbol)
                                 finish_if_all_closed(carryover_exit)
                         else:
-                            notifier.send(f"매도미체결 {display_name(c.name, c.symbol)} {filled_qty}/{max(ord_qty, qty)}주 | 주문번호:{odno}")
+                            if in_auction:
+                                notifier.send(f"매도동시호가대기 {display_name(c.name, c.symbol)} {filled_qty}/{max(ord_qty, qty)}주 | 주문번호:{odno}")
+                            else:
+                                notifier.send(f"매도미체결 {display_name(c.name, c.symbol)} {filled_qty}/{max(ord_qty, qty)}주 | 주문번호:{odno}")
                     else:
-                        notifier.send(f"매도실패 {display_name(c.name, c.symbol)} {qty}주 {close:.0f}원")
+                        if in_auction:
+                            notifier.send(f"매도동시호가대기 {display_name(c.name, c.symbol)} {qty}주 {close:.0f}원 | {format_kis_error(res)}")
+                        else:
+                            notifier.send(f"매도실패 {display_name(c.name, c.symbol)} {qty}주 {close:.0f}원")
         for c in watch_candidates:
             if c.symbol not in signaled_this_cycle and positions.get(c.symbol, 0) <= 0:
                 signal_first_seen_at.pop(c.symbol, None)
@@ -3996,6 +4023,7 @@ def main() -> None:
                                 continue
                             raise
                         ok = str(res.get("rt_cd", "")) == "0"
+                        in_auction = in_call_auction_window(now)
                         if ok:
                             odno = str(res.get("output", {}).get("ODNO", "")).strip()
                             notifier.send(f"매수주문접수 {display_name(c.name, c.symbol)} {qty}주 {close:.0f}원 | 주문번호:{odno} | {buy_tag} | 신호시각:{signal_at.strftime('%H:%M:%S')}")
@@ -4037,7 +4065,10 @@ def main() -> None:
                                 if filled_qty > 0:
                                     set_position_entry(c.symbol, filled_qty, float(close))
                             else:
-                                notifier.send(f"매수미체결 {display_name(c.name, c.symbol)} {filled_qty}/{max(ord_qty, qty)}주 | 주문번호:{odno} | {buy_tag}")
+                                if in_auction:
+                                    notifier.send(f"매수동시호가대기 {display_name(c.name, c.symbol)} {filled_qty}/{max(ord_qty, qty)}주 | 주문번호:{odno} | {buy_tag}")
+                                else:
+                                    notifier.send(f"매수미체결 {display_name(c.name, c.symbol)} {filled_qty}/{max(ord_qty, qty)}주 | 주문번호:{odno} | {buy_tag}")
                                 order_cooldown_until[c.symbol] = now + timedelta(seconds=30)
                                 notifier.send(f"재시도대기 {display_name(c.name, c.symbol)} | 30초 후 재확인")
                         else:
@@ -4047,9 +4078,14 @@ def main() -> None:
                                     f"매수지연 {display_name(c.name, c.symbol)} | 호출제한 15초대기 | {buy_tag} | {format_kis_error(res)}"
                                 )
                             else:
-                                notifier.send(
-                                    f"매수실패 {display_name(c.name, c.symbol)} {qty}주 {close:.0f}원 | {buy_tag} | {format_kis_error(res)}"
-                                )
+                                if in_auction:
+                                    notifier.send(
+                                        f"매수동시호가대기 {display_name(c.name, c.symbol)} {qty}주 {close:.0f}원 | {buy_tag} | {format_kis_error(res)}"
+                                    )
+                                else:
+                                    notifier.send(
+                                        f"매수실패 {display_name(c.name, c.symbol)} {qty}주 {close:.0f}원 | {buy_tag} | {format_kis_error(res)}"
+                                    )
         if cycle + 1 < args.max_cycles:
             sleep_with_telegram_poll(max(1, int(args.scan_interval_sec)))
 
