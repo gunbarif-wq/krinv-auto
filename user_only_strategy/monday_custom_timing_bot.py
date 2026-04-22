@@ -2382,6 +2382,13 @@ def watch_preview(candidates: List["Candidate"], max_items: int = 12) -> str:
     return ", ".join(names)
 
 
+def append_chart_reason(name: str, chart_reason: str) -> str:
+    reason = str(chart_reason or "").strip()
+    if not reason:
+        return name
+    return f"{name}({reason})"
+
+
 def display_name(name: str, symbol: str = "") -> str:
     n = str(name or "").strip()
     if n and not n.isdigit():
@@ -2734,6 +2741,7 @@ def main() -> None:
         args.telegram_chat_id,
         message_prefix="",
     )
+    notifier.send("봇기동/재기동")
     buy_chart_model_path = resolve_chart_model_path(
         args.chart_classifier_model,
         "data/chart_models/live50_30d_final.pkl",
@@ -2785,6 +2793,7 @@ def main() -> None:
     last_slots_full_notice_at: datetime | None = None
     signal_first_seen_at: Dict[str, datetime] = {}
     last_near_buy_notice_at: Dict[str, datetime] = {}
+    latest_chart_reason_by_symbol: Dict[str, str] = {}
     net_err_streak = 0
     last_net_alert_at: datetime | None = None
     order_cooldown_until: Dict[str, datetime] = {}
@@ -3042,14 +3051,25 @@ def main() -> None:
         names: List[str] = []
         for candidate in watch_candidates:
             nm = display_name(candidate.name, candidate.symbol)
+            nm = append_chart_reason(nm, latest_chart_reason_by_symbol.get(candidate.symbol, ""))
             if nm not in names:
                 names.append(nm)
         for symbol in sorted(manual_watch_symbols):
             nm = display_name(known_name_map.get(symbol, symbol), symbol)
+            nm = append_chart_reason(nm, latest_chart_reason_by_symbol.get(symbol, ""))
             if nm not in names:
                 names.append(nm)
         if not names:
             return "-"
+        return ", ".join(names)
+
+    def watch_preview_with_chart_scores(candidates: List[Candidate], max_items: int = 12) -> str:
+        if not candidates:
+            return "-"
+        names: List[str] = []
+        for c in candidates[:max_items]:
+            nm = display_name(c.name, c.symbol)
+            names.append(append_chart_reason(nm, latest_chart_reason_by_symbol.get(c.symbol, "")))
         return ", ".join(names)
 
     def rebuild_manual_watch_candidates() -> List[Candidate]:
@@ -3604,11 +3624,11 @@ def main() -> None:
                     notifier.send(f"테마선정 {len(theme_groups)}개")
                     for group in theme_groups:
                         notifier.send(f"테마그룹 | {format_theme_group(group)}")
-                    notifier.send(f"대장모니터링 {len(merged_watch)}개 | {watch_preview(merged_watch)}")
+                    notifier.send(f"대장모니터링 {len(merged_watch)}개 | {watch_preview_with_chart_scores(merged_watch)}")
                 watch_candidates = merged_watch
                 persist_runtime_state()
                 if watch_candidates:
-                    notifier.send(f"모니터링등록 {len(watch_candidates)}개 | {watch_preview(watch_candidates)}")
+                    notifier.send(f"모니터링등록 {len(watch_candidates)}개 | {watch_preview_with_chart_scores(watch_candidates)}")
                 last_refresh = datetime.now(KST)
                 manual_selection_requested = False
                 first_run_at_window_open = False
@@ -3632,7 +3652,7 @@ def main() -> None:
                 or (now - last_watch_report).total_seconds() >= max(60, int(args.watch_report_interval_min) * 60)
             )
         ):
-            notifier.send(f"실시간 모니터링 | {watch_preview(watch_candidates)}")
+            notifier.send(f"실시간 모니터링 | {watch_preview_with_chart_scores(watch_candidates)}")
             last_watch_report = now
 
         if not in_korean_trading_session(now, args.market_open_hhmm, args.market_close_hhmm) or not watch_candidates:
@@ -3700,6 +3720,7 @@ def main() -> None:
                     bonus_scale=float(args.chart_classifier_bonus_scale),
                     bar_minutes=int(args.bar_minutes),
                 )
+                latest_chart_reason_by_symbol[c.symbol] = chart_reason
                 chart_buy_ok = bool(
                     chart_classifier_payload
                     and "차트점수=" in chart_reason
@@ -4033,6 +4054,20 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as exc:
+        try:
+            load_dotenv()
+            args = parse_args()
+            Notifier(
+                Path(args.log_file),
+                args.telegram_bot_token,
+                args.telegram_chat_id,
+                message_prefix="",
+            ).send(f"봇중단 | {type(exc).__name__} | {exc}")
+        except Exception:
+            pass
+        raise
 
 
