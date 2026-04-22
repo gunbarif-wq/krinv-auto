@@ -37,8 +37,8 @@ from user_only_strategy.krx_symbol_names import (  # noqa: E402
 KST = ZoneInfo("Asia/Seoul")
 VTS_BASE_URL = "https://openapivts.koreainvestment.com:29443"
 PROD_BASE_URL = "https://openapi.koreainvestment.com:9443"
-DEFAULT_TRADING_OPEN_HHMM = 800
-DEFAULT_TRADING_CLOSE_HHMM = 2000
+DEFAULT_TRADING_OPEN_HHMM = 850
+DEFAULT_TRADING_CLOSE_HHMM = 1530
 DEFAULT_SEARCH_START_HHMM = 700
 DEFAULT_MINUTE_MARKET_CODE = "UN"
 DEFAULT_WATCH_STATE_FILE = str(ROOT / "user_only_strategy" / "watch_state.json")
@@ -2800,6 +2800,7 @@ def main() -> None:
     signal_first_seen_at: Dict[str, datetime] = {}
     last_near_buy_notice_at: Dict[str, datetime] = {}
     latest_chart_reason_by_symbol: Dict[str, str] = {}
+    latest_sell_chart_reason_by_symbol: Dict[str, str] = {}
     net_err_streak = 0
     last_net_alert_at: datetime | None = None
     order_cooldown_until: Dict[str, datetime] = {}
@@ -3020,6 +3021,7 @@ def main() -> None:
         peak_price.pop(symbol, None)
         entry_time.pop(symbol, None)
         limit_up_hold_day.pop(symbol, None)
+        latest_sell_chart_reason_by_symbol.pop(symbol, None)
         watch_candidates[:] = [candidate for candidate in watch_candidates if candidate.symbol != symbol]
         manual_watch_symbols.discard(symbol)
         persist_runtime_state()
@@ -3057,12 +3059,22 @@ def main() -> None:
         names: List[str] = []
         for candidate in watch_candidates:
             nm = display_name(candidate.name, candidate.symbol)
-            nm = append_chart_reason(nm, latest_chart_reason_by_symbol.get(candidate.symbol, ""))
+            chart_reason = (
+                latest_sell_chart_reason_by_symbol.get(candidate.symbol, "")
+                if positions.get(candidate.symbol, 0) > 0
+                else latest_chart_reason_by_symbol.get(candidate.symbol, "")
+            )
+            nm = append_chart_reason(nm, chart_reason)
             if nm not in names:
                 names.append(nm)
         for symbol in sorted(manual_watch_symbols):
             nm = display_name(known_name_map.get(symbol, symbol), symbol)
-            nm = append_chart_reason(nm, latest_chart_reason_by_symbol.get(symbol, ""))
+            chart_reason = (
+                latest_sell_chart_reason_by_symbol.get(symbol, "")
+                if positions.get(symbol, 0) > 0
+                else latest_chart_reason_by_symbol.get(symbol, "")
+            )
+            nm = append_chart_reason(nm, chart_reason)
             if nm not in names:
                 names.append(nm)
         if not names:
@@ -3075,7 +3087,12 @@ def main() -> None:
         names: List[str] = []
         for c in candidates[:max_items]:
             nm = display_name(c.name, c.symbol)
-            names.append(append_chart_reason(nm, latest_chart_reason_by_symbol.get(c.symbol, "")))
+            chart_reason = (
+                latest_sell_chart_reason_by_symbol.get(c.symbol, "")
+                if positions.get(c.symbol, 0) > 0
+                else latest_chart_reason_by_symbol.get(c.symbol, "")
+            )
+            names.append(append_chart_reason(nm, chart_reason))
         return ", ".join(names)
 
     def rebuild_manual_watch_candidates() -> List[Candidate]:
@@ -3815,6 +3832,7 @@ def main() -> None:
                     bonus_scale=10.0,
                     bar_minutes=int(args.bar_minutes),
                 )
+                latest_sell_chart_reason_by_symbol[c.symbol] = chart_sell_reason
                 chart_sell_ready = bool(
                     sell_chart_classifier_payload
                     and "차트점수=" in chart_sell_reason
