@@ -288,6 +288,78 @@ def is_insufficient_order_cash_error(res: Dict) -> bool:
     return "40250000" in msg_cd or "주문가능금액이 부족" in msg1
 
 
+def inquire_orderable_qty(
+    base_url: str,
+    token: str,
+    app_key: str,
+    app_secret: str,
+    cano: str,
+    acnt_prdt_cd: str,
+    *,
+    symbol: str,
+    price: float,
+    qty_hint: int,
+) -> int:
+    """
+    KIS '주문가능조회' returns the true max orderable qty for a given symbol/price.
+    In mock/VTS, this can be lower than what cash inquiry suggests.
+    """
+    url = f"{base_url}/uapi/domestic-stock/v1/trading/inquire-psbl-order"
+    headers = {
+        "authorization": f"Bearer {token}",
+        "appKey": app_key,
+        "appSecret": app_secret,
+        "tr_id": "VTTC8908R" if is_demo_base_url(base_url) else "TTTC8908R",
+        "custtype": "P",
+    }
+    params = {
+        "CANO": cano,
+        "ACNT_PRDT_CD": acnt_prdt_cd,
+        "PDNO": str(symbol).zfill(6),
+        "ORD_DVSN": "01",  # market
+        "ORD_QTY": str(max(1, int(qty_hint))),
+        "ORD_UNPR": str(int(max(0.0, float(price)))),
+    }
+    data = request_json_with_retry("get", url, headers=headers, params=params, timeout=15, retries=3)
+    if str(data.get("rt_cd", "")).strip() != "0":
+        raise KisHttpError(data)
+    candidates: List[Dict] = []
+    out = data.get("output", {})
+    if isinstance(out, dict):
+        candidates.append(out)
+    elif isinstance(out, list):
+        candidates.extend([x for x in out if isinstance(x, dict)])
+    for extra_key in ("output1", "output2"):
+        extra = data.get(extra_key, {})
+        if isinstance(extra, dict):
+            candidates.append(extra)
+        elif isinstance(extra, list):
+            candidates.extend([x for x in extra if isinstance(x, dict)])
+
+    for obj in candidates:
+        for key in (
+            "ord_psbl_qty",
+            "max_ord_qty",
+            "max_buy_qty",
+            "psbl_qty",
+            "buy_psbl_qty",
+        ):
+            v = obj.get(key)
+            if v is None:
+                continue
+            s = str(v).replace(",", "").strip()
+            if not s:
+                continue
+            if s.isdigit():
+                return max(0, int(s))
+            try:
+                return max(0, int(float(s)))
+            except Exception:
+                continue
+    # If schema changes, safest fallback is to not clamp.
+    return max(0, int(qty_hint))
+
+
 def _to_int(value: str | int | float | None) -> int:
     try:
         if value is None:
@@ -3511,6 +3583,23 @@ def main() -> None:
                     if qty <= 0:
                         notifier.send(f"수동매수실패 | 수량0 | {display_name(name, symbol)}")
                         continue
+                    try:
+                        max_qty = inquire_orderable_qty(
+                            args.base_url,
+                            token,
+                            args.app_key,
+                            args.app_secret,
+                            args.cano,
+                            args.acnt_prdt_cd,
+                            symbol=symbol,
+                            price=float(close),
+                            qty_hint=qty,
+                        )
+                        if max_qty > 0:
+                            qty = min(qty, max_qty)
+                    except Exception:
+                        # If psbl-order query fails, fall back to cash-only qty.
+                        pass
                     attempted_qty = qty
                     while attempted_qty > 0:
                         try:
@@ -4407,6 +4496,22 @@ def main() -> None:
                         notifier.send(f"매수 {display_name(c.name, c.symbol)} {qty}주 {close:.0f}원 (DRY) | {display_buy_tag} | 신호시각:{signal_at.strftime('%H:%M:%S')}")
                         set_position_entry(c.symbol, qty, float(close))
                     else:
+                        try:
+                            max_qty = inquire_orderable_qty(
+                                args.base_url,
+                                token,
+                                args.app_key,
+                                args.app_secret,
+                                args.cano,
+                                args.acnt_prdt_cd,
+                                symbol=c.symbol,
+                                price=float(close),
+                                qty_hint=qty,
+                            )
+                            if max_qty > 0:
+                                qty = min(qty, max_qty)
+                        except Exception:
+                            pass
                         attempted_qty = qty
                         while attempted_qty > 0:
                             try:
