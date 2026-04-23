@@ -21,11 +21,13 @@ load_env() {
   fi
   # Parse .env safely on Linux even if it contains BOM/CRLF.
   # Supports simple KEY=VALUE lines (no shell expansions).
+  local bom
+  bom=$'\xEF\xBB\xBF'
   while IFS= read -r line || [[ -n "$line" ]]; do
     # Strip CR (Windows line endings)
     line="${line%$'\r'}"
     # Strip UTF-8 BOM if present at the beginning of file/line
-    line="${line#"$'\ufeff'"}"
+    line="${line#"$bom"}"
     # Skip blanks/comments
     [[ -z "$line" ]] && continue
     [[ "$line" =~ ^[[:space:]]*# ]] && continue
