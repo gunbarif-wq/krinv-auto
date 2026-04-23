@@ -3448,6 +3448,43 @@ def main() -> None:
                 target.append(nm)
         return format_monitoring_groups(held_names, watch_names)
 
+    def refresh_chart_reasons_from_cache() -> None:
+        # Off-session or right after restart, we may not have fresh per-symbol chart reasons.
+        # Use the persisted bar_cache window to compute and attach the last known score.
+        symbols: set[str] = {c.symbol for c in watch_candidates} | set(manual_watch_symbols)
+        for symbol in sorted(symbols):
+            rows = bar_cache.get(symbol) or []
+            if not isinstance(rows, list) or len(rows) < 40:
+                continue
+            held = positions.get(symbol, 0) > 0
+            try:
+                if held:
+                    _p, _b, reason = score_chart_classifier_bonus(
+                        rows,
+                        sell_chart_classifier_payload,
+                        symbol=symbol,
+                        cache_dir=sell_chart_classifier_cache_dir,
+                        threshold=sell_chart_threshold_base,
+                        bonus_scale=10.0,
+                        bar_minutes=int(args.bar_minutes),
+                    )
+                    if reason:
+                        latest_sell_chart_reason_by_symbol[symbol] = reason
+                else:
+                    _p, _b, reason = score_chart_classifier_bonus(
+                        rows,
+                        chart_classifier_payload,
+                        symbol=symbol,
+                        cache_dir=chart_classifier_cache_dir,
+                        threshold=buy_chart_threshold_base,
+                        bonus_scale=float(args.chart_classifier_bonus_scale),
+                        bar_minutes=int(args.bar_minutes),
+                    )
+                    if reason:
+                        latest_chart_reason_by_symbol[symbol] = reason
+            except Exception:
+                continue
+
     def watch_preview_with_chart_scores(candidates: List[Candidate], max_items: int = 12) -> str:
         if not candidates:
             return "-"
@@ -3559,6 +3596,7 @@ def main() -> None:
                 notifier.send("종목선정중지 요청접수")
                 continue
             if action == "status":
+                refresh_chart_reasons_from_cache()
                 current_watch = monitoring_preview()
                 notifier.send(f"현재 모니터링종목 | {current_watch}")
                 continue
