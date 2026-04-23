@@ -2035,8 +2035,9 @@ def format_holdings_report(
             current_price = avg_price
         pnl = (current_price - avg_price) * qty if avg_price > 0 else 0.0
         pnl_text = f"{pnl:+,.0f}원"
+        pnl_pct = ((current_price / avg_price) - 1.0) * 100.0 if avg_price > 0 else 0.0
         lines.append(
-            f"{name} | 평가손익 {pnl_text} | 보유 {qty}주 | 매입단가 {avg_price:,.0f} | 현재가 {current_price:,.0f}"
+            f"{name} | 수익률 {pnl_pct:+.2f}% | 평가손익 {pnl_text} | 보유 {qty}주 | 매입단가 {avg_price:,.0f} | 현재가 {current_price:,.0f}"
         )
     return "\n".join(lines) if lines else "현재 보유종목 | -"
 
