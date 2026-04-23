@@ -3498,12 +3498,10 @@ def main() -> None:
         persist_runtime_state()
 
     def maybe_notify_trading_paused(now_local: datetime) -> None:
+        # Intentionally no-op: user requested only the explicit pause/resume messages.
+        # Keep the function so call sites remain simple.
         nonlocal last_trading_paused_notice_at
-        if not trading_paused:
-            return
-        if last_trading_paused_notice_at is None or (now_local - last_trading_paused_notice_at).total_seconds() >= 120:
-            notifier.send("매매중지 상태: 매수/매도 주문 생략")
-            last_trading_paused_notice_at = now_local
+        last_trading_paused_notice_at = now_local
 
     def poll_telegram_commands(now_local: datetime) -> None:
         nonlocal telegram_update_offset, last_telegram_poll_at, last_refresh, manual_selection_requested, selection_cancel_requested, next_auto_selection_at, trading_paused, last_trading_paused_notice_at
