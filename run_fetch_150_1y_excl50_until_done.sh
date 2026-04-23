@@ -15,12 +15,33 @@ runner_log_path="$repo_dir/logs/fetch_150_1y_real.runner.txt"
 mkdir -p "$repo_dir/logs" "$repo_dir/data/chart_retrain/$run_name"
 
 load_env() {
-  if [[ -f "$repo_dir/.env" ]]; then
-    set -a
-    # shellcheck disable=SC1091
-    . "$repo_dir/.env"
-    set +a
+  local env_path="$repo_dir/.env"
+  if [[ ! -f "$env_path" ]]; then
+    return
   fi
+  # Parse .env safely on Linux even if it contains BOM/CRLF.
+  # Supports simple KEY=VALUE lines (no shell expansions).
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    # Strip CR (Windows line endings)
+    line="${line%$'\r'}"
+    # Strip UTF-8 BOM if present at the beginning of file/line
+    line="${line#"$'\ufeff'"}"
+    # Skip blanks/comments
+    [[ -z "$line" ]] && continue
+    [[ "$line" =~ ^[[:space:]]*# ]] && continue
+    # Only accept KEY=VALUE
+    if [[ "$line" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]]; then
+      key="${line%%=*}"
+      val="${line#*=}"
+      # Remove surrounding quotes if present
+      if [[ "$val" =~ ^\".*\"$ ]]; then
+        val="${val:1:${#val}-2}"
+      elif [[ "$val" =~ ^\'.*\'$ ]]; then
+        val="${val:1:${#val}-2}"
+      fi
+      export "$key=$val"
+    fi
+  done <"$env_path"
 }
 
 read_json_int() {
@@ -124,4 +145,3 @@ while true; do
 
   sleep 10
 done
-
