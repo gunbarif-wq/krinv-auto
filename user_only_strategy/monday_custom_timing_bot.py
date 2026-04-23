@@ -2410,11 +2410,12 @@ def append_chart_reason(name: str, chart_reason: str, *, held: bool = False) -> 
     reason = str(chart_reason or "").strip()
     if not reason:
         return name
-    match = re.search(r"차트점수=([0-9.]+)", reason)
-    if not match:
-        return name
     label = "매도차트" if held else "매수차트"
-    return f"{name}({label}={match.group(1)})"
+    if reason.startswith("차트점수="):
+        reason = f"{label}={reason.split('=', 1)[1]}"
+    else:
+        reason = f"{label}={reason}"
+    return f"{name}({reason})"
 
 
 def display_name(name: str, symbol: str = "") -> str:
