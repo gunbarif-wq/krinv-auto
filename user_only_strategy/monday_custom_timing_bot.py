@@ -843,6 +843,7 @@ def load_watch_state(path_text: str) -> Dict[str, object]:
         "peak_price": {},
         "entry_time": {},
         "profit_take_stage": {},
+        "trading_paused": False,
         "limit_up_hold_day": {},
         "watch_candidates": [],
         "bought_symbols_today": [],
@@ -914,6 +915,7 @@ def save_watch_state(
     peak_price: Dict[str, float],
     entry_time: Dict[str, datetime],
     profit_take_stage: Dict[str, int],
+    trading_paused: bool,
     limit_up_hold_day: Dict[str, datetime.date],
     watch_candidates: List["Candidate"],
     bought_symbols_today: set[str],
@@ -931,6 +933,7 @@ def save_watch_state(
         "peak_price": {str(k).zfill(6): float(v) for k, v in peak_price.items() if str(k).isdigit()},
         "entry_time": {str(k).zfill(6): v.isoformat() for k, v in entry_time.items() if isinstance(v, datetime)},
         "profit_take_stage": {str(k).zfill(6): int(v) for k, v in profit_take_stage.items() if str(k).isdigit()},
+        "trading_paused": bool(trading_paused),
         "limit_up_hold_day": {str(k).zfill(6): v.isoformat() for k, v in limit_up_hold_day.items() if hasattr(v, "isoformat")},
         "watch_candidates": [candidate_to_state_row(candidate) for candidate in watch_candidates if str(candidate.symbol).isdigit()],
         "bought_symbols_today": sorted({str(x).zfill(6) for x in bought_symbols_today if str(x).isdigit()}),
@@ -1918,6 +1921,10 @@ def parse_telegram_watch_command(text: str, known_name_map: Dict[str, str]) -> T
     if not raw:
         return "ignore", []
     monitor_key = re.sub(r"\s+", "", raw)
+    if monitor_key == "매매중지":
+        return "pause_trading", []
+    if monitor_key == "매매재개":
+        return "resume_trading", []
     if monitor_key == "종목선정중지":
         return "cancel_select", []
     if monitor_key == "종목선정":
@@ -3050,6 +3057,7 @@ def main() -> None:
     peak_price: Dict[str, float] = {}
     entry_time: Dict[str, datetime] = {}
     profit_take_stage: Dict[str, int] = {}
+    trading_paused = False
     known_name_map: Dict[str, str] = {}
     manual_watch_symbols: set[str] = set()
     bought_symbols_today: set[str] = set()
@@ -3062,6 +3070,7 @@ def main() -> None:
     manual_selection_requested = False
     next_auto_selection_at: datetime | None = None
     selection_cancel_requested = False
+    last_trading_paused_notice_at: datetime | None = None
     last_slots_full_notice_at: datetime | None = None
     signal_first_seen_at: Dict[str, datetime] = {}
     last_near_buy_notice_at: Dict[str, datetime] = {}
@@ -3195,6 +3204,8 @@ def main() -> None:
     for symbol, value in dict(saved_state.get("profit_take_stage", {})).items():
         if str(symbol).isdigit():
             profit_take_stage[str(symbol).zfill(6)] = max(0, _to_int(value))
+    if isinstance(saved_state.get("trading_paused"), bool):
+        trading_paused = bool(saved_state.get("trading_paused"))
     for symbol, value in dict(saved_state.get("limit_up_hold_day", {})).items():
         if not str(symbol).isdigit():
             continue
@@ -3239,6 +3250,7 @@ def main() -> None:
             peak_price=peak_price,
             entry_time=entry_time,
             profit_take_stage=profit_take_stage,
+            trading_paused=trading_paused,
             limit_up_hold_day=limit_up_hold_day,
             watch_candidates=watch_candidates,
             bought_symbols_today=bought_symbols_today,
@@ -3485,8 +3497,16 @@ def main() -> None:
         watch_candidates[:] = [c for c in watch_candidates if c.symbol in keep_symbols or c.symbol in manual_watch_symbols]
         persist_runtime_state()
 
+    def maybe_notify_trading_paused(now_local: datetime) -> None:
+        nonlocal last_trading_paused_notice_at
+        if not trading_paused:
+            return
+        if last_trading_paused_notice_at is None or (now_local - last_trading_paused_notice_at).total_seconds() >= 120:
+            notifier.send("매매중지 상태: 매수/매도 주문 생략")
+            last_trading_paused_notice_at = now_local
+
     def poll_telegram_commands(now_local: datetime) -> None:
-        nonlocal telegram_update_offset, last_telegram_poll_at, last_refresh, manual_selection_requested, selection_cancel_requested, next_auto_selection_at
+        nonlocal telegram_update_offset, last_telegram_poll_at, last_refresh, manual_selection_requested, selection_cancel_requested, next_auto_selection_at, trading_paused, last_trading_paused_notice_at
         if not args.telegram_bot_token or not args.telegram_chat_id:
             return
         if last_telegram_poll_at is not None:
@@ -3521,6 +3541,17 @@ def main() -> None:
                 selection_cancel_requested = False
                 last_refresh = None
                 notifier.send("종목선정 요청접수")
+                continue
+            if action == "pause_trading":
+                trading_paused = True
+                last_trading_paused_notice_at = None
+                persist_runtime_state()
+                notifier.send("매매중지 설정: 매수/매도 주문 중지")
+                continue
+            if action == "resume_trading":
+                trading_paused = False
+                persist_runtime_state()
+                notifier.send("매매재개: 매수/매도 주문 재개")
                 continue
             if action == "cancel_select":
                 selection_cancel_requested = True
@@ -3569,6 +3600,9 @@ def main() -> None:
                     close = float(candidate.close) if candidate is not None else 0.0
                     if close <= 0:
                         notifier.send(f"수동매수실패 | 현재가 확인불가 | {display_name(name, symbol)}")
+                        continue
+                    if trading_paused:
+                        maybe_notify_trading_paused(now_local)
                         continue
                     budget = compute_order_budget_krw(
                         args=args,
@@ -3673,6 +3707,9 @@ def main() -> None:
             if action == "sell":
                 for symbol, name in payload[:1]:
                     sync_holdings_from_account(datetime.now(KST))
+                    if trading_paused:
+                        maybe_notify_trading_paused(now_local)
+                        continue
                     qty = int(positions.get(symbol, 0))
                     if qty <= 0:
                         holdings = fetch_account_holdings(
@@ -4357,6 +4394,9 @@ def main() -> None:
                         profit_take_stage[c.symbol] = max(1, current_stage)
                         persist_runtime_state()
                 else:
+                    if trading_paused:
+                        maybe_notify_trading_paused(now)
+                        continue
                     try:
                         res = place_order(
                             base_url=args.base_url,
@@ -4472,6 +4512,9 @@ def main() -> None:
                 ranked = sorted(buy_candidates, key=lambda x: (x[0], -x[1]))
                 for signal_at, score, c, close, buy_tag in ranked[:buys_left]:
                     sync_holdings_from_account(now)
+                    if trading_paused:
+                        maybe_notify_trading_paused(now)
+                        continue
                     holding_count = sum(1 for q in positions.values() if q > 0)
                     if positions.get(c.symbol, 0) <= 0 and holding_count >= int(args.max_positions):
                         continue
