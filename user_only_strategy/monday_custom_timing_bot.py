@@ -282,6 +282,12 @@ def is_rate_limited_error(res: Dict) -> bool:
     return "EGW00201" in msg_cd or "EGW00201" in msg1 or "초당 거래건수" in msg1
 
 
+def is_insufficient_order_cash_error(res: Dict) -> bool:
+    msg_cd = str(res.get("msg_cd", "")).strip()
+    msg1 = str(res.get("msg1", "")).strip()
+    return "40250000" in msg_cd or "주문가능금액이 부족" in msg1
+
+
 def _to_int(value: str | int | float | None) -> int:
     try:
         if value is None:
@@ -531,6 +537,7 @@ def compute_order_budget_krw(
     acnt_prdt_cd: str,
 ) -> float:
     pct = min(1.0, max(0.0, float(args.position_size_pct)))
+    order_cap = max(0.0, float(getattr(args, "max_order_krw", 0.0)))
     requested_budget = max(0.0, float(args.order_krw)) if float(args.order_krw) > 0 else -1.0
     fallback_budget = requested_budget if requested_budget >= 0 else max(0.0, float(args.initial_cash) * pct)
     try:
@@ -543,12 +550,15 @@ def compute_order_budget_krw(
             acnt_prdt_cd=acnt_prdt_cd,
         )
     except Exception:
-        return fallback_budget
+        return min(fallback_budget, order_cap) if order_cap > 0 else fallback_budget
     if requested_budget >= 0:
-        return max(0.0, min(available_cash, requested_budget))
+        budget = max(0.0, min(available_cash, requested_budget))
+        return min(budget, order_cap) if order_cap > 0 else budget
     if total_equity <= 0:
-        return min(available_cash, fallback_budget) if available_cash > 0 else fallback_budget
-    return max(0.0, min(available_cash, total_equity * pct))
+        budget = min(available_cash, fallback_budget) if available_cash > 0 else fallback_budget
+        return min(budget, order_cap) if order_cap > 0 else budget
+    budget = max(0.0, min(available_cash, total_equity * pct))
+    return min(budget, order_cap) if order_cap > 0 else budget
 
 
 def fetch_ranking_rows(
@@ -760,6 +770,7 @@ def load_watch_state(path_text: str) -> Dict[str, object]:
         "entry_price": {},
         "peak_price": {},
         "entry_time": {},
+        "profit_take_stage": {},
         "limit_up_hold_day": {},
         "watch_candidates": [],
         "bought_symbols_today": [],
@@ -830,6 +841,7 @@ def save_watch_state(
     entry_price: Dict[str, float],
     peak_price: Dict[str, float],
     entry_time: Dict[str, datetime],
+    profit_take_stage: Dict[str, int],
     limit_up_hold_day: Dict[str, datetime.date],
     watch_candidates: List["Candidate"],
     bought_symbols_today: set[str],
@@ -846,6 +858,7 @@ def save_watch_state(
         "entry_price": {str(k).zfill(6): float(v) for k, v in entry_price.items() if str(k).isdigit()},
         "peak_price": {str(k).zfill(6): float(v) for k, v in peak_price.items() if str(k).isdigit()},
         "entry_time": {str(k).zfill(6): v.isoformat() for k, v in entry_time.items() if isinstance(v, datetime)},
+        "profit_take_stage": {str(k).zfill(6): int(v) for k, v in profit_take_stage.items() if str(k).isdigit()},
         "limit_up_hold_day": {str(k).zfill(6): v.isoformat() for k, v in limit_up_hold_day.items() if hasattr(v, "isoformat")},
         "watch_candidates": [candidate_to_state_row(candidate) for candidate in watch_candidates if str(candidate.symbol).isdigit()],
         "bought_symbols_today": sorted({str(x).zfill(6) for x in bought_symbols_today if str(x).isdigit()}),
@@ -1657,10 +1670,13 @@ def select_theme_leaders(
     prev_day_stats: Dict[str, PreviousDayStats] | None = None,
     theme_count: int = 2,
     progress_cb: Callable[[int, int, int, str], None] | None = None,
+    stop_cb: Callable[[], bool] | None = None,
 ) -> Tuple[List[Candidate], List[ThemeGroup]]:
     analyzed: List[Tuple[Candidate, np.ndarray]] = []
     total = len(universe)
     for idx, (symbol, name) in enumerate(universe, start=1):
+        if stop_cb and stop_cb():
+            return [], []
         rows = fetch_minute_ohlcv(
             base_url=base_url,
             token=token,
@@ -1830,6 +1846,8 @@ def parse_telegram_watch_command(text: str, known_name_map: Dict[str, str]) -> T
     if not raw:
         return "ignore", []
     monitor_key = re.sub(r"\s+", "", raw)
+    if monitor_key == "종목선정중지":
+        return "cancel_select", []
     if monitor_key == "종목선정":
         return "select", []
     if monitor_key == "보유":
@@ -2443,6 +2461,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--sell-stop-loss-pct", type=float, default=0.015, help="hard stop loss from entry (e.g. 0.015=1.5%)")
     p.add_argument("--sell-trailing-stop-pct", type=float, default=0.02, help="trailing stop from peak (e.g. 0.02=2%)")
     p.add_argument("--sell-trailing-activate-pct", type=float, default=0.012, help="arm trailing stop after this gain from entry")
+    p.add_argument("--max-order-krw", type=float, default=float(os.getenv("MAX_ORDER_KRW", "4999999")), help="per-symbol order cap under cash-only sizing")
     p.add_argument("--sell-max-hold-min", type=int, default=180, help="time-based exit after holding minutes, 0 disables")
     p.add_argument("--log-file", default="logs/user_only_strategy_signals.txt")
     p.add_argument("--telegram-bot-token", default=os.getenv("TELEGRAM_BOT_TOKEN", ""))
@@ -2504,6 +2523,15 @@ def append_chart_reason(name: str, chart_reason: str, *, held: bool = False) -> 
 def format_order_amount(price: float, qty: int) -> str:
     amount = max(0.0, float(price)) * max(0, int(qty))
     return f"{amount:,.0f}원"
+
+
+def format_monitoring_groups(
+    held_items: List[str],
+    watch_items: List[str],
+) -> str:
+    held_text = ", ".join(held_items) if held_items else "-"
+    watch_text = ", ".join(watch_items) if watch_items else "-"
+    return f"보유 | {held_text} | 미보유 | {watch_text}"
 
 
 def display_name(name: str, symbol: str = "") -> str:
@@ -2949,6 +2977,7 @@ def main() -> None:
     entry_price: Dict[str, float] = {}
     peak_price: Dict[str, float] = {}
     entry_time: Dict[str, datetime] = {}
+    profit_take_stage: Dict[str, int] = {}
     known_name_map: Dict[str, str] = {}
     manual_watch_symbols: set[str] = set()
     bought_symbols_today: set[str] = set()
@@ -2960,6 +2989,7 @@ def main() -> None:
     last_telegram_poll_at: datetime | None = None
     manual_selection_requested = False
     next_auto_selection_at: datetime | None = None
+    selection_cancel_requested = False
     last_slots_full_notice_at: datetime | None = None
     signal_first_seen_at: Dict[str, datetime] = {}
     last_near_buy_notice_at: Dict[str, datetime] = {}
@@ -3090,6 +3120,9 @@ def main() -> None:
             entry_time[str(symbol).zfill(6)] = datetime.fromisoformat(str(value))
         except Exception:
             continue
+    for symbol, value in dict(saved_state.get("profit_take_stage", {})).items():
+        if str(symbol).isdigit():
+            profit_take_stage[str(symbol).zfill(6)] = max(0, _to_int(value))
     for symbol, value in dict(saved_state.get("limit_up_hold_day", {})).items():
         if not str(symbol).isdigit():
             continue
@@ -3133,6 +3166,7 @@ def main() -> None:
             entry_price=entry_price,
             peak_price=peak_price,
             entry_time=entry_time,
+            profit_take_stage=profit_take_stage,
             limit_up_hold_day=limit_up_hold_day,
             watch_candidates=watch_candidates,
             bought_symbols_today=bought_symbols_today,
@@ -3238,6 +3272,8 @@ def main() -> None:
         required_watch_count = max(1, slots_left)
         if nonholding_watch_count >= required_watch_count:
             return
+        if manual_selection_requested and next_auto_selection_at is not None and next_auto_selection_at <= now_local:
+            return
         manual_selection_requested = True
         next_auto_selection_at = now_local
         notifier.send(
@@ -3249,6 +3285,7 @@ def main() -> None:
         entry_price[symbol] = float(price)
         peak_price[symbol] = float(price)
         entry_time[symbol] = datetime.now(KST)
+        profit_take_stage[symbol] = 0
         bought_symbols_today.add(symbol)
         traded_symbols_today.add(symbol)
         signal_first_seen_at.pop(symbol, None)
@@ -3261,6 +3298,7 @@ def main() -> None:
         entry_price.pop(symbol, None)
         peak_price.pop(symbol, None)
         entry_time.pop(symbol, None)
+        profit_take_stage.pop(symbol, None)
         limit_up_hold_day.pop(symbol, None)
         latest_sell_chart_reason_by_symbol.pop(symbol, None)
         watch_candidates[:] = [candidate for candidate in watch_candidates if candidate.symbol != symbol]
@@ -3297,7 +3335,8 @@ def main() -> None:
             return None
 
     def monitoring_preview() -> str:
-        names: List[str] = []
+        held_names: List[str] = []
+        watch_names: List[str] = []
         for candidate in watch_candidates:
             nm = display_name(candidate.name, candidate.symbol)
             held = positions.get(candidate.symbol, 0) > 0
@@ -3307,8 +3346,9 @@ def main() -> None:
                 else latest_chart_reason_by_symbol.get(candidate.symbol, "")
             )
             nm = append_chart_reason(nm, chart_reason, held=held)
-            if nm not in names:
-                names.append(nm)
+            target = held_names if held else watch_names
+            if nm not in target:
+                target.append(nm)
         for symbol in sorted(manual_watch_symbols):
             nm = display_name(known_name_map.get(symbol, symbol), symbol)
             held = positions.get(symbol, 0) > 0
@@ -3318,11 +3358,10 @@ def main() -> None:
                 else latest_chart_reason_by_symbol.get(symbol, "")
             )
             nm = append_chart_reason(nm, chart_reason, held=held)
-            if nm not in names:
-                names.append(nm)
-        if not names:
-            return "-"
-        return ", ".join(names)
+            target = held_names if held else watch_names
+            if nm not in target:
+                target.append(nm)
+        return format_monitoring_groups(held_names, watch_names)
 
     def watch_preview_with_chart_scores(candidates: List[Candidate], max_items: int = 12) -> str:
         if not candidates:
@@ -3375,7 +3414,7 @@ def main() -> None:
         persist_runtime_state()
 
     def poll_telegram_commands(now_local: datetime) -> None:
-        nonlocal telegram_update_offset, last_telegram_poll_at, last_refresh, manual_selection_requested
+        nonlocal telegram_update_offset, last_telegram_poll_at, last_refresh, manual_selection_requested, selection_cancel_requested, next_auto_selection_at
         if not args.telegram_bot_token or not args.telegram_chat_id:
             return
         if last_telegram_poll_at is not None:
@@ -3407,8 +3446,15 @@ def main() -> None:
                 continue
             if action == "select":
                 manual_selection_requested = True
+                selection_cancel_requested = False
                 last_refresh = None
                 notifier.send("종목선정 요청접수")
+                continue
+            if action == "cancel_select":
+                selection_cancel_requested = True
+                manual_selection_requested = False
+                next_auto_selection_at = None
+                notifier.send("종목선정중지 요청접수")
                 continue
             if action == "status":
                 current_watch = monitoring_preview()
@@ -3465,25 +3511,35 @@ def main() -> None:
                     if qty <= 0:
                         notifier.send(f"수동매수실패 | 수량0 | {display_name(name, symbol)}")
                         continue
-                    try:
-                        res = place_order(
-                            base_url=args.base_url,
-                            token=token,
-                            app_key=args.app_key,
-                            app_secret=args.app_secret,
-                            cano=args.cano,
-                            acnt_prdt_cd=args.acnt_prdt_cd,
-                            symbol=symbol,
-                            qty=qty,
-                            side="buy",
-                        )
-                    except Exception as e:
-                        if is_network_block_error(e):
-                            wait_sec = notify_net_error(e)
-                            time.sleep(wait_sec)
-                            notifier.send(f"수동매수실패 | 네트워크 | {display_name(name, symbol)}")
-                            continue
-                        raise
+                    attempted_qty = qty
+                    while attempted_qty > 0:
+                        try:
+                            res = place_order(
+                                base_url=args.base_url,
+                                token=token,
+                                app_key=args.app_key,
+                                app_secret=args.app_secret,
+                                cano=args.cano,
+                                acnt_prdt_cd=args.acnt_prdt_cd,
+                                symbol=symbol,
+                                qty=attempted_qty,
+                                side="buy",
+                            )
+                        except Exception as e:
+                            if is_network_block_error(e):
+                                wait_sec = notify_net_error(e)
+                                time.sleep(wait_sec)
+                                notifier.send(f"수동매수실패 | 네트워크 | {display_name(name, symbol)}")
+                                attempted_qty = 0
+                                break
+                            raise
+                        if str(res.get("rt_cd", "")) == "0" or not is_insufficient_order_cash_error(res):
+                            qty = attempted_qty
+                            break
+                        attempted_qty -= 1
+                    if attempted_qty <= 0:
+                        notifier.send(f"수동매수실패 | 수량0 | {display_name(name, symbol)}")
+                        continue
                     ok = str(res.get("rt_cd", "")) == "0"
                     in_auction = in_call_auction_window(now_local)
                     if ok:
@@ -3776,7 +3832,11 @@ def main() -> None:
         if args.auto_selection_enabled and now.weekday() < 5:
             auto_hhmm = int(args.auto_selection_hhmm)
             retry_min = max(1, int(args.auto_selection_retry_min))
-            has_active_monitoring = bool(watch_candidates or manual_watch_symbols or any(q > 0 for q in positions.values()))
+            has_active_monitoring = bool(
+                any(q > 0 for q in positions.values())
+                or any(positions.get(c.symbol, 0) <= 0 for c in watch_candidates)
+                or any(positions.get(symbol, 0) <= 0 for symbol in manual_watch_symbols)
+            )
             if theme_selection_day != now.date() and hhmm >= auto_hhmm and not has_active_monitoring:
                 if next_auto_selection_at is None:
                     next_auto_selection_at = now
@@ -3910,6 +3970,7 @@ def main() -> None:
                         prev_day_stats=prev_stats_map,
                         theme_count=int(args.theme_count),
                         progress_cb=progress_cb,
+                        stop_cb=lambda: selection_cancel_requested,
                     )
                 except Exception as e:
                     if is_network_block_error(e):
@@ -3917,6 +3978,15 @@ def main() -> None:
                         time.sleep(wait_sec)
                         continue
                     raise
+                if selection_cancel_requested:
+                    notifier.send("종목선정중지 완료")
+                    selection_cancel_requested = False
+                    manual_selection_requested = False
+                    next_auto_selection_at = None
+                    last_refresh = now
+                    if cycle + 1 < args.max_cycles:
+                        sleep_with_telegram_poll(max(1, int(args.scan_interval_sec)))
+                    continue
                 strict_filtered_count = len(leaders)
                 net_err_streak = 0
                 merged_watch: List[Candidate] = rebuild_manual_watch_candidates()
@@ -4056,34 +4126,16 @@ def main() -> None:
                 signaled_this_cycle.add(c.symbol)
                 buy_candidates.append((signal_at, chosen_score, c, float(close), chosen_tag))
             else:
-                prev_stat = fetch_single_previous_day_stat(
-                    args.base_url,
-                    token,
-                    args.app_key,
-                    args.app_secret,
-                    c.symbol,
-                )
-                limit_up_price = extract_limit_up_price(prev_stat)
-                intraday_high = max(float(r["high"]) for r in rows)
-                close_to_limit = limit_up_price > 0 and float(close) >= limit_up_price * 0.995
-                touched_limit = limit_up_price > 0 and intraday_high >= limit_up_price * 0.999
-                if touched_limit and close_to_limit:
-                    if limit_up_hold_day.get(c.symbol) != now.date():
-                        limit_up_hold_day[c.symbol] = now.date()
-                        notifier.send(f"상한가보유전환 | {display_name(c.name, c.symbol)} | 기준 {limit_up_price:.0f}원")
-                        persist_runtime_state()
-                elif limit_up_hold_day.get(c.symbol) == now.date():
-                    limit_up_hold_day.pop(c.symbol, None)
-                    notifier.send(f"상한가유지해제 | {display_name(c.name, c.symbol)} | 기준 {limit_up_price:.0f}원 재분석")
-                    persist_runtime_state()
-                hold_due_limit_today = limit_up_hold_day.get(c.symbol) == now.date() and close_to_limit
-                if hold_due_limit_today:
-                    continue
                 sell_ok, sell_reason, sell_signal_score = sell_signal_from_minute_bars(rows)
                 ep = float(entry_price.get(c.symbol, close))
                 pp = max(float(peak_price.get(c.symbol, ep)), float(close))
                 peak_price[c.symbol] = pp
                 profit_pct = ((float(close) / ep) - 1.0) if ep > 0 else 0.0
+                current_stage = int(profit_take_stage.get(c.symbol, 0) or 0)
+                if current_stage < 1 and profit_pct >= 0.05:
+                    current_stage = 1
+                    profit_take_stage[c.symbol] = 1
+                    persist_runtime_state()
                 stop_loss_ok = float(close) <= ep * (1.0 - max(0.0, float(args.sell_stop_loss_pct)))
                 trail_activate_pct = max(0.0, float(args.sell_trailing_activate_pct))
                 trail_stop_pct = max(0.0, float(args.sell_trailing_stop_pct))
@@ -4095,7 +4147,7 @@ def main() -> None:
                 trailing_ok = trail_armed and (float(close) <= pp * (1.0 - trail_stop_pct))
                 profit_floor_pct = 0.03
                 profit_floor_price = ep * (1.0 + profit_floor_pct)
-                profit_floor_armed = pp >= profit_floor_price
+                profit_floor_armed = current_stage >= 1
                 profit_floor_ok = profit_floor_armed and float(close) <= profit_floor_price
                 hold_min = -1
                 hold_time_ok = False
@@ -4155,7 +4207,7 @@ def main() -> None:
                     or hold_time_sell
                 )
                 reason_parts: List[str] = [
-                    f"차트:{chart_sell_reason}",
+                    f"차트:{strip_chart_bonus(chart_sell_reason)}",
                     f"매도결합={combined_sell_score:.2f}(차트{sell_chart_weight:.2f}+지표{indicator_sell_weight:.2f})",
                 ]
                 if chart_sell_strong:
@@ -4199,11 +4251,22 @@ def main() -> None:
                 if qty <= 0:
                     clear_position_state(c.symbol)
                     continue
-                carryover_exit = c.symbol in limit_up_hold_day and limit_up_hold_day.get(c.symbol) != now.date()
+                sell_qty = qty
+                if current_stage < 1 and profit_pct >= 0.05 and qty >= 2:
+                    sell_qty = max(1, qty // 2)
+                elif profit_floor_ok:
+                    sell_qty = qty
+                carryover_exit = False
                 if args.dry_run:
-                    notifier.send(f"매도 {display_name(c.name, c.symbol)} {qty}주 {close:.0f}원 (DRY) | {final_sell_reason}")
-                    clear_position_state(c.symbol)
-                    finish_if_all_closed(carryover_exit)
+                    notifier.send(f"매도 {display_name(c.name, c.symbol)} {sell_qty}주 {close:.0f}원 (DRY) | {final_sell_reason}")
+                    remain = max(0, qty - sell_qty)
+                    if remain <= 0:
+                        clear_position_state(c.symbol)
+                        finish_if_all_closed(carryover_exit)
+                    else:
+                        positions[c.symbol] = remain
+                        profit_take_stage[c.symbol] = max(1, current_stage)
+                        persist_runtime_state()
                 else:
                     try:
                         res = place_order(
@@ -4214,7 +4277,7 @@ def main() -> None:
                             cano=args.cano,
                             acnt_prdt_cd=args.acnt_prdt_cd,
                             symbol=c.symbol,
-                            qty=qty,
+                            qty=sell_qty,
                             side="sell",
                         )
                     except Exception as e:
@@ -4228,7 +4291,7 @@ def main() -> None:
                     if ok:
                         odno = str(res.get("output", {}).get("ODNO", "")).strip()
                         notifier.send(
-                            f"매도주문접수 {display_name(c.name, c.symbol)} {qty}주 {close:.0f}원 | 주문금액 {format_order_amount(close, qty)} | {final_sell_reason}"
+                            f"매도주문접수 {display_name(c.name, c.symbol)} {sell_qty}주 {close:.0f}원 | 주문금액 {format_order_amount(close, sell_qty)} | {final_sell_reason}"
                         )
                         sleep_with_telegram_poll(5)
                         try:
@@ -4258,16 +4321,22 @@ def main() -> None:
                         )
                         if remaining_qty == 0:
                             status = "filled"
-                            filled_qty = max(filled_qty, qty)
-                            ord_qty = max(ord_qty, qty)
+                            filled_qty = max(filled_qty, sell_qty)
+                            ord_qty = max(ord_qty, sell_qty)
                         if status == "filled":
                             notifier.send(
                                 f"매도체결 {display_name(c.name, c.symbol)} {filled_qty}주 | 체결금액 {format_order_amount(close, filled_qty)}"
                             )
                             send_trade_result_message(c.symbol, c.name, filled_qty, close)
-                            clear_position_state(c.symbol)
-                            schedule_reselection_if_needed(now)
-                            finish_if_all_closed(carryover_exit)
+                            remain = remaining_qty if remaining_qty >= 0 else max(0, qty - filled_qty)
+                            if remain <= 0:
+                                clear_position_state(c.symbol)
+                                schedule_reselection_if_needed(now)
+                                finish_if_all_closed(carryover_exit)
+                            else:
+                                positions[c.symbol] = remain
+                                profit_take_stage[c.symbol] = max(1, current_stage)
+                                persist_runtime_state()
                         elif status == "partial":
                             notifier.send(
                                 f"매도부분체결 {display_name(c.name, c.symbol)} {filled_qty}/{max(ord_qty, qty)}주 | 체결금액 {format_order_amount(close, filled_qty)}"
@@ -4275,6 +4344,7 @@ def main() -> None:
                             send_trade_result_message(c.symbol, c.name, filled_qty, close)
                             remain = remaining_qty if remaining_qty >= 0 else max(0, qty - max(0, filled_qty))
                             positions[c.symbol] = remain
+                            profit_take_stage[c.symbol] = max(1, current_stage)
                             persist_runtime_state()
                             if remain <= 0:
                                 clear_position_state(c.symbol)
@@ -4287,22 +4357,12 @@ def main() -> None:
                                 notifier.send(f"매도미체결 {display_name(c.name, c.symbol)} {filled_qty}/{max(ord_qty, qty)}주")
                     else:
                         if in_auction:
-                            notifier.send(f"매도동시호가대기 {display_name(c.name, c.symbol)} {qty}주 {close:.0f}원 | {format_kis_error(res)}")
+                                notifier.send(f"매도동시호가대기 {display_name(c.name, c.symbol)} {sell_qty}주 {close:.0f}원 | {format_kis_error(res)}")
                         else:
-                            notifier.send(f"매도실패 {display_name(c.name, c.symbol)} {qty}주 {close:.0f}원")
+                            notifier.send(f"매도실패 {display_name(c.name, c.symbol)} {sell_qty}주 {close:.0f}원")
         for c in watch_candidates:
             if c.symbol not in signaled_this_cycle and positions.get(c.symbol, 0) <= 0:
                 signal_first_seen_at.pop(c.symbol, None)
-        if (
-            in_korean_trading_session(now, args.market_open_hhmm, args.market_close_hhmm)
-            and watch_candidates
-            and (
-                last_watch_report is None
-                or (now - last_watch_report).total_seconds() >= max(60, int(args.watch_report_interval_min) * 60)
-            )
-        ):
-            notifier.send(f"실시간 모니터링 | {watch_preview_with_chart_scores(watch_candidates)}")
-            last_watch_report = now
         if is_daily_trade_finished(now.date()):
             if cycle + 1 < args.max_cycles:
                 sleep_with_telegram_poll(max(1, int(args.scan_interval_sec)))
@@ -4342,34 +4402,45 @@ def main() -> None:
                     if qty <= 0:
                         notifier.send(f"매수스킵 {display_name(c.name, c.symbol)} 수량0")
                         continue
+                    display_buy_tag = strip_chart_bonus(buy_tag)
                     if args.dry_run:
-                        notifier.send(f"매수 {display_name(c.name, c.symbol)} {qty}주 {close:.0f}원 (DRY) | {buy_tag} | 신호시각:{signal_at.strftime('%H:%M:%S')}")
+                        notifier.send(f"매수 {display_name(c.name, c.symbol)} {qty}주 {close:.0f}원 (DRY) | {display_buy_tag} | 신호시각:{signal_at.strftime('%H:%M:%S')}")
                         set_position_entry(c.symbol, qty, float(close))
                     else:
-                        try:
-                            res = place_order(
-                                base_url=args.base_url,
-                                token=token,
-                                app_key=args.app_key,
-                                app_secret=args.app_secret,
-                                cano=args.cano,
-                                acnt_prdt_cd=args.acnt_prdt_cd,
-                                symbol=c.symbol,
-                                qty=qty,
-                                side="buy",
-                            )
-                        except Exception as e:
-                            if is_network_block_error(e):
-                                wait_sec = notify_net_error(e)
-                                time.sleep(wait_sec)
-                                continue
-                            raise
+                        attempted_qty = qty
+                        while attempted_qty > 0:
+                            try:
+                                res = place_order(
+                                    base_url=args.base_url,
+                                    token=token,
+                                    app_key=args.app_key,
+                                    app_secret=args.app_secret,
+                                    cano=args.cano,
+                                    acnt_prdt_cd=args.acnt_prdt_cd,
+                                    symbol=c.symbol,
+                                    qty=attempted_qty,
+                                    side="buy",
+                                )
+                            except Exception as e:
+                                if is_network_block_error(e):
+                                    wait_sec = notify_net_error(e)
+                                    time.sleep(wait_sec)
+                                    attempted_qty = 0
+                                    break
+                                raise
+                            if str(res.get("rt_cd", "")) == "0" or not is_insufficient_order_cash_error(res):
+                                qty = attempted_qty
+                                break
+                            attempted_qty -= 1
+                        if attempted_qty <= 0:
+                            notifier.send(f"매수실패 {display_name(c.name, c.symbol)} 0주 {close:.0f}원 | {display_buy_tag} | 수량0")
+                            continue
                         ok = str(res.get("rt_cd", "")) == "0"
                         in_auction = in_call_auction_window(now)
                         if ok:
                             odno = str(res.get("output", {}).get("ODNO", "")).strip()
                             notifier.send(
-                                f"매수주문접수 {display_name(c.name, c.symbol)} {qty}주 {close:.0f}원 | 주문금액 {format_order_amount(close, qty)} | {buy_tag} | 신호시각:{signal_at.strftime('%H:%M:%S')}"
+                                f"매수주문접수 {display_name(c.name, c.symbol)} {qty}주 {close:.0f}원 | 주문금액 {format_order_amount(close, qty)} | {display_buy_tag} | 신호시각:{signal_at.strftime('%H:%M:%S')}"
                             )
                             sleep_with_telegram_poll(5)
                             try:
@@ -4403,36 +4474,36 @@ def main() -> None:
                                 ord_qty = max(ord_qty, qty)
                             if status == "filled":
                                 notifier.send(
-                                    f"매수체결 {display_name(c.name, c.symbol)} {filled_qty}주 | 체결금액 {format_order_amount(close, filled_qty)} | {buy_tag}"
+                                    f"매수체결 {display_name(c.name, c.symbol)} {filled_qty}주 | 체결금액 {format_order_amount(close, filled_qty)} | {display_buy_tag}"
                                 )
                                 set_position_entry(c.symbol, filled_qty, float(close))
                             elif status == "partial":
                                 notifier.send(
-                                    f"매수부분체결 {display_name(c.name, c.symbol)} {filled_qty}/{max(ord_qty, qty)}주 | 체결금액 {format_order_amount(close, filled_qty)} | {buy_tag}"
+                                    f"매수부분체결 {display_name(c.name, c.symbol)} {filled_qty}/{max(ord_qty, qty)}주 | 체결금액 {format_order_amount(close, filled_qty)} | {display_buy_tag}"
                                 )
                                 if filled_qty > 0:
                                     set_position_entry(c.symbol, filled_qty, float(close))
                             else:
                                 if in_auction:
-                                    notifier.send(f"매수동시호가대기 {display_name(c.name, c.symbol)} {filled_qty}/{max(ord_qty, qty)}주 | {buy_tag}")
+                                    notifier.send(f"매수동시호가대기 {display_name(c.name, c.symbol)} {filled_qty}/{max(ord_qty, qty)}주 | {display_buy_tag}")
                                 else:
-                                    notifier.send(f"매수미체결 {display_name(c.name, c.symbol)} {filled_qty}/{max(ord_qty, qty)}주 | {buy_tag}")
+                                    notifier.send(f"매수미체결 {display_name(c.name, c.symbol)} {filled_qty}/{max(ord_qty, qty)}주 | {display_buy_tag}")
                                 order_cooldown_until[c.symbol] = now + timedelta(seconds=30)
                                 notifier.send(f"재시도대기 {display_name(c.name, c.symbol)} | 30초 후 재확인")
                         else:
                             if is_rate_limited_error(res):
                                 order_cooldown_until[c.symbol] = now + timedelta(seconds=15)
                                 notifier.send(
-                                    f"매수지연 {display_name(c.name, c.symbol)} | 호출제한 15초대기 | {buy_tag} | {format_kis_error(res)}"
+                                    f"매수지연 {display_name(c.name, c.symbol)} | 호출제한 15초대기 | {display_buy_tag} | {format_kis_error(res)}"
                                 )
                             else:
                                 if in_auction:
                                     notifier.send(
-                                        f"매수동시호가대기 {display_name(c.name, c.symbol)} {qty}주 {close:.0f}원 | {buy_tag} | {format_kis_error(res)}"
+                                        f"매수동시호가대기 {display_name(c.name, c.symbol)} {qty}주 {close:.0f}원 | {display_buy_tag} | {format_kis_error(res)}"
                                     )
                                 else:
                                     notifier.send(
-                                        f"매수실패 {display_name(c.name, c.symbol)} {qty}주 {close:.0f}원 | {buy_tag} | {format_kis_error(res)}"
+                                        f"매수실패 {display_name(c.name, c.symbol)} {qty}주 {close:.0f}원 | {display_buy_tag} | {format_kis_error(res)}"
                                     )
         if cycle + 1 < args.max_cycles:
             sleep_with_telegram_poll(max(1, int(args.scan_interval_sec)))
