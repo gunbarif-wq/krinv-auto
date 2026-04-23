@@ -42,6 +42,7 @@ DEFAULT_TRADING_CLOSE_HHMM = 1530
 DEFAULT_SEARCH_START_HHMM = 801
 DEFAULT_MINUTE_MARKET_CODE = "UN"
 DEFAULT_WATCH_STATE_FILE = str(ROOT / "user_only_strategy" / "watch_state.json")
+DEFAULT_BAR_CACHE_FILE = str(ROOT / "logs" / "bar_cache.json")
 SYMBOL_ALIAS_MAP = {
     "하이닉스": "000660",
     "sk하이닉스": "000660",
@@ -965,9 +966,23 @@ def ensure_chart_window_rows(
     market_code: str,
     bar_minutes: int,
     min_rows: int = 40,
+    bar_cache: Dict[str, List[Dict[str, float]]] | None = None,
 ) -> List[Dict[str, float]]:
     if len(rows) >= min_rows:
         return rows
+    # First, try to pad using locally cached bars (previous run / previous day).
+    try:
+        if bar_cache is not None:
+            cached = list(bar_cache.get(symbol, []) or [])
+            if cached:
+                merged_map: Dict[str, Dict[str, float]] = {}
+                for row in cached + rows:
+                    merged_map[str(int(row["date"]))] = row
+                merged = [merged_map[k] for k in sorted(merged_map.keys())]
+                if len(merged) >= min_rows:
+                    return merged[-min_rows:]
+    except Exception:
+        pass
     try:
         today = datetime.now(KST).date()
         prev_day = _previous_business_day(today)
@@ -992,6 +1007,53 @@ def ensure_chart_window_rows(
         return merged[-max(min_rows, len(rows)) :]
     except Exception:
         return rows
+
+
+def _load_bar_cache(path: Path) -> Dict[str, List[Dict[str, float]]]:
+    try:
+        if not path.exists():
+            return {}
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict):
+            return {}
+        out: Dict[str, List[Dict[str, float]]] = {}
+        raw = payload.get("symbols", {})
+        if not isinstance(raw, dict):
+            return {}
+        for sym, rows in raw.items():
+            if not isinstance(sym, str) or not isinstance(rows, list):
+                continue
+            cleaned: List[Dict[str, float]] = []
+            for r in rows:
+                if not isinstance(r, dict):
+                    continue
+                try:
+                    cleaned.append(
+                        {
+                            "date": float(r.get("date", 0.0)),
+                            "open": float(r.get("open", 0.0)),
+                            "high": float(r.get("high", 0.0)),
+                            "low": float(r.get("low", 0.0)),
+                            "close": float(r.get("close", 0.0)),
+                            "volume": float(r.get("volume", 0.0)),
+                        }
+                    )
+                except Exception:
+                    continue
+            if cleaned:
+                out[sym.strip().zfill(6)] = cleaned
+        return out
+    except Exception:
+        return {}
+
+
+def _save_bar_cache(path: Path, cache: Dict[str, List[Dict[str, float]]]) -> None:
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {"updated_at": datetime.now(KST).strftime("%Y-%m-%d %H:%M:%S"), "symbols": cache}
+        path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    except Exception:
+        return
 
 
 def sma(arr: np.ndarray, window: int) -> np.ndarray:
@@ -2379,6 +2441,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--extra-symbols-file", default=os.getenv("NEXT_MARKET_SYMBOLS_FILE", ""), help="extra symbols file path")
     p.add_argument("--symbol-name-file", default=os.getenv("KRX_SYMBOL_NAME_FILE", DEFAULT_SYMBOL_NAME_FILE))
     p.add_argument("--watch-state-file", default=os.getenv("WATCH_STATE_FILE", DEFAULT_WATCH_STATE_FILE))
+    p.add_argument("--bar-cache-file", default=os.getenv("BAR_CACHE_FILE", DEFAULT_BAR_CACHE_FILE), help="local cache to pad early-session bars")
     p.add_argument("--chart-classifier-model", default=os.getenv("CHART_CLASSIFIER_MODEL", ""), help="optional buy image classifier pickle path")
     p.add_argument("--chart-classifier-threshold", type=float, default=float(os.getenv("CHART_CLASSIFIER_THRESHOLD", "0.50")))
     p.add_argument("--chart-classifier-threshold-morning", type=float, default=float(os.getenv("CHART_CLASSIFIER_THRESHOLD_MORNING", os.getenv("CHART_CLASSIFIER_THRESHOLD", "0.50"))))
@@ -2969,6 +3032,11 @@ def main() -> None:
             known_name_map.update(merged)
 
     saved_state = load_watch_state(args.watch_state_file)
+    bar_cache_path = Path(str(args.bar_cache_file)).expanduser()
+    if not bar_cache_path.is_absolute():
+        bar_cache_path = (ROOT / bar_cache_path).resolve()
+    bar_cache: Dict[str, List[Dict[str, float]]] = _load_bar_cache(bar_cache_path)
+    last_bar_cache_save_at: datetime | None = None
     manual_watch_symbols.update(
         {
             str(x).strip().zfill(6)
@@ -3822,7 +3890,20 @@ def main() -> None:
                 market_code=args.minute_market_code,
                 bar_minutes=int(args.bar_minutes),
                 min_rows=40,
+                bar_cache=bar_cache,
             )
+            # Keep a rolling cache of the latest window to reduce warmup at session open.
+            try:
+                if len(rows) >= 40:
+                    bar_cache[c.symbol] = rows[-40:]
+                    if (
+                        last_bar_cache_save_at is None
+                        or (now - last_bar_cache_save_at).total_seconds() >= 60
+                    ):
+                        _save_bar_cache(bar_cache_path, bar_cache)
+                        last_bar_cache_save_at = now
+            except Exception:
+                pass
             net_err_streak = 0
             close = rows[-1]["close"]
             has_pos = positions.get(c.symbol, 0) > 0
