@@ -1,12 +1,13 @@
 import argparse
 import json
+import sys
 from pathlib import Path
 
-from user_only_strategy.monday_custom_timing_bot import (
-    fetch_candidate_universe,
-    get_access_token,
-    load_dotenv,
-)
+# Ensure we can import monday_custom_timing_bot.py even when user_only_strategy is not a package.
+THIS_DIR = Path(__file__).resolve().parent
+sys.path.insert(0, str(THIS_DIR))
+
+from monday_custom_timing_bot import fetch_candidate_universe, get_access_token, load_dotenv  # noqa: E402
 
 
 def _read_symbols_from_summary(path: Path) -> set[str]:
@@ -91,4 +92,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
