@@ -94,6 +94,11 @@ def is_token_expired_error(res: Dict | None) -> bool:
     return "EGW00123" in msg_cd or "기간이 만료된 token" in msg1
 
 
+def is_token_issue_rate_limited_error(exc: Exception) -> bool:
+    text = str(exc)
+    return "EGW00133" in text or "1분당 1회" in text or "잠시 후 다시 시도" in text
+
+
 def _extract_error_payload(response: requests.Response) -> Dict:
     try:
         data = response.json()
@@ -2926,7 +2931,15 @@ def main() -> None:
     if extra_symbols:
         extra_symbols = sorted(set(extra_symbols))
         notifier.send(f"추가후보 {len(extra_symbols)}개 반영")
-    token = get_access_token(args.app_key, args.app_secret, base_url=args.base_url)
+    while True:
+        try:
+            token = get_access_token(args.app_key, args.app_secret, base_url=args.base_url)
+            break
+        except Exception as exc:
+            if not is_token_issue_rate_limited_error(exc):
+                raise
+            notifier.send("토큰발급제한 | 65초 후 자동재시도")
+            sleep_with_telegram_poll(65)
     watch_candidates: List[Candidate] = []
     strict_filtered_count = 0
     blocked_unbuyable_symbols: set[str] = set()
