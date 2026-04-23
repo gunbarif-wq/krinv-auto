@@ -3757,6 +3757,7 @@ def main() -> None:
                     strict_filtered_count = 0
         poll_telegram_commands(now)
         sync_holdings_from_account(now)
+        schedule_reselection_if_needed(now)
 
         # Auto theme-selection schedule:
         # - Start at 08:01 (or configured) once per day.
@@ -3946,17 +3947,6 @@ def main() -> None:
             drop_nonholding_after_close()
             notifier.send("운영종료: 오늘 운용 종료")
             close_notified_day = now.date()
-
-        if (
-            in_korean_trading_session(now, args.market_open_hhmm, args.market_close_hhmm)
-            and watch_candidates
-            and (
-                last_watch_report is None
-                or (now - last_watch_report).total_seconds() >= max(60, int(args.watch_report_interval_min) * 60)
-            )
-        ):
-            notifier.send(f"실시간 모니터링 | {watch_preview_with_chart_scores(watch_candidates)}")
-            last_watch_report = now
 
         if not in_korean_trading_session(now, args.market_open_hhmm, args.market_close_hhmm) or not watch_candidates:
             if cycle + 1 < args.max_cycles:
@@ -4292,6 +4282,16 @@ def main() -> None:
         for c in watch_candidates:
             if c.symbol not in signaled_this_cycle and positions.get(c.symbol, 0) <= 0:
                 signal_first_seen_at.pop(c.symbol, None)
+        if (
+            in_korean_trading_session(now, args.market_open_hhmm, args.market_close_hhmm)
+            and watch_candidates
+            and (
+                last_watch_report is None
+                or (now - last_watch_report).total_seconds() >= max(60, int(args.watch_report_interval_min) * 60)
+            )
+        ):
+            notifier.send(f"실시간 모니터링 | {watch_preview_with_chart_scores(watch_candidates)}")
+            last_watch_report = now
         if is_daily_trade_finished(now.date()):
             if cycle + 1 < args.max_cycles:
                 sleep_with_telegram_poll(max(1, int(args.scan_interval_sec)))
