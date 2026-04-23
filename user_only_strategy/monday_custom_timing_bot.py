@@ -501,10 +501,8 @@ def fetch_account_budget_info(
         cash_only_candidates = [x for x in (dnca_tot_amt, prvs_rcdl_excc_amt) if x > 0]
         if cash_only_candidates:
             available_cash = min(cash_only_candidates)
-            if ord_psbl_cash > 0:
-                available_cash = min(available_cash, ord_psbl_cash)
         else:
-            available_cash = ord_psbl_cash if ord_psbl_cash > 0 else 0.0
+            available_cash = 0.0
         total_equity = max(
             _to_float(row.get("tot_evlu_amt")),
             _to_float(row.get("scts_evlu_amt")) + available_cash,
