@@ -3210,6 +3210,21 @@ def main() -> None:
         daily_trade_finished_day = datetime.now(KST).date()
         notifier.send(f"당일마감 | {reason}")
 
+    def schedule_reselection_if_one_left(now_local: datetime) -> None:
+        nonlocal manual_selection_requested, next_auto_selection_at
+        holding_count = sum(1 for q in positions.values() if q > 0)
+        if holding_count != 1:
+            return
+        if is_daily_trade_finished(now_local.date()):
+            return
+        if now_local.weekday() >= 5:
+            return
+        if not in_refresh_window(now_local, args.refresh_start_hhmm, args.refresh_end_hhmm):
+            return
+        manual_selection_requested = True
+        next_auto_selection_at = now_local
+        notifier.send(f"재선정예약 | 보유 {holding_count}/{int(args.max_positions)}종목")
+
     def set_position_entry(symbol: str, qty: int, price: float) -> None:
         positions[symbol] = max(0, int(qty))
         entry_price[symbol] = float(price)
@@ -4067,6 +4082,10 @@ def main() -> None:
                     trail_stop_pct = max(trail_stop_pct, 0.025)
                 trail_armed = pp >= ep * (1.0 + trail_activate_pct)
                 trailing_ok = trail_armed and (float(close) <= pp * (1.0 - trail_stop_pct))
+                profit_floor_pct = 0.03
+                profit_floor_price = ep * (1.0 + profit_floor_pct)
+                profit_floor_armed = pp >= profit_floor_price
+                profit_floor_ok = profit_floor_armed and float(close) <= profit_floor_price
                 hold_min = -1
                 hold_time_ok = False
                 et = entry_time.get(c.symbol)
@@ -4118,6 +4137,7 @@ def main() -> None:
                 hold_time_sell = bool(hold_time_ok and chart_sell_weak)
                 final_sell_ok = bool(
                     stop_loss_ok
+                    or profit_floor_ok
                     or chart_sell_strong
                     or trailing_ok
                     or chart_indicator_sell
@@ -4141,6 +4161,10 @@ def main() -> None:
                     reason_parts.append(f"지표:{sell_reason}")
                 if stop_loss_ok:
                     reason_parts.append(f"손절(entry={ep:.0f},close={float(close):.0f})")
+                if profit_floor_ok:
+                    reason_parts.append(
+                        f"수익보존(entry={ep:.0f},peak={pp:.0f},floor={profit_floor_price:.0f},close={float(close):.0f})"
+                    )
                 if trailing_ok:
                     reason_parts.append(f"트레일링(entry={ep:.0f},peak={pp:.0f},close={float(close):.0f},trail={trail_stop_pct*100:.1f}%)")
                 if hold_time_sell:
@@ -4231,6 +4255,7 @@ def main() -> None:
                             )
                             send_trade_result_message(c.symbol, c.name, filled_qty, close)
                             clear_position_state(c.symbol)
+                            schedule_reselection_if_one_left(now)
                             finish_if_all_closed(carryover_exit)
                         elif status == "partial":
                             notifier.send(
@@ -4242,6 +4267,7 @@ def main() -> None:
                             persist_runtime_state()
                             if remain <= 0:
                                 clear_position_state(c.symbol)
+                                schedule_reselection_if_one_left(now)
                                 finish_if_all_closed(carryover_exit)
                         else:
                             if in_auction:
