@@ -46,10 +46,28 @@ def _save_cached_token(app_key: str, base_url: str, token: str, expires_in: int)
         json.dump(obj, f, ensure_ascii=False, indent=2)
 
 
-def get_access_token(app_key: str, app_secret: str, base_url: str = DEFAULT_BASE_URL) -> str:
-    cached = _load_cached_token(app_key, base_url)
+def _invalidate_cached_token(app_key: str, base_url: str) -> None:
+    if not os.path.exists(TOKEN_CACHE_PATH):
+        return
+    try:
+        with open(TOKEN_CACHE_PATH, "r", encoding="utf-8") as f:
+            obj = json.load(f)
+    except Exception:
+        return
+    key = f"{base_url}|{app_key}"
+    if key not in obj:
+        return
+    obj.pop(key, None)
+    with open(TOKEN_CACHE_PATH, "w", encoding="utf-8") as f:
+        json.dump(obj, f, ensure_ascii=False, indent=2)
+
+
+def get_access_token(app_key: str, app_secret: str, base_url: str = DEFAULT_BASE_URL, force_refresh: bool = False) -> str:
+    cached = None if force_refresh else _load_cached_token(app_key, base_url)
     if cached:
         return cached
+    if force_refresh:
+        _invalidate_cached_token(app_key, base_url)
 
     url = f"{base_url}/oauth2/tokenP"
     payload = {

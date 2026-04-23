@@ -153,7 +153,7 @@ def request_json_with_retry(
                 if is_token_expired_error(payload) and not refreshed_once:
                     refreshed_once = True
                     request_headers["authorization"] = (
-                        f"Bearer {get_access_token(request_headers.get('appKey', ''), request_headers.get('appSecret', ''), base_url=_base_url_from_url(url))}"
+                        f"Bearer {get_access_token(request_headers.get('appKey', ''), request_headers.get('appSecret', ''), base_url=_base_url_from_url(url), force_refresh=True)}"
                     )
                     continue
                 raise KisHttpError(payload)
@@ -245,7 +245,7 @@ def place_order(
             return r.json()
         payload = _extract_error_payload(r)
         if is_token_expired_error(payload) and attempt == 0:
-            auth_token = get_access_token(app_key, app_secret, base_url=base_url)
+            auth_token = get_access_token(app_key, app_secret, base_url=base_url, force_refresh=True)
             continue
         payload["msg1"] = f"http_{r.status_code} {json.dumps(payload, ensure_ascii=False)}"
         return payload
