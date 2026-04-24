@@ -4290,7 +4290,20 @@ def main() -> None:
                     continue
                 strict_filtered_count = len(leaders)
                 net_err_streak = 0
-                merged_watch: List[Candidate] = rebuild_manual_watch_candidates()
+                merged_watch: List[Candidate] = []
+                # Preserve existing monitoring list on reselection; do not drop candidates abruptly.
+                # Priority: (1) held positions, (2) manual watch symbols, (3) existing non-holdings, (4) new leaders.
+                existing_by_symbol: Dict[str, Candidate] = {c.symbol: c for c in watch_candidates}
+                for c in watch_candidates:
+                    if positions.get(c.symbol, 0) > 0 and c.symbol not in {x.symbol for x in merged_watch}:
+                        merged_watch.append(c)
+                for candidate in rebuild_manual_watch_candidates():
+                    if any(x.symbol == candidate.symbol for x in merged_watch):
+                        continue
+                    merged_watch.append(candidate)
+                for c in watch_candidates:
+                    if positions.get(c.symbol, 0) <= 0 and not any(x.symbol == c.symbol for x in merged_watch):
+                        merged_watch.append(c)
                 if not leaders:
                     notifier.send("테마대장 선정 없음")
                     # Schedule next auto retry (if enabled).
@@ -4302,12 +4315,31 @@ def main() -> None:
                         if len(merged_watch) >= max(1, int(args.max_watch_candidates)):
                             break
                         if any(x.symbol == leader.symbol for x in merged_watch):
+                            # Replace existing entry with the enriched leader payload (score/MA/theme).
+                            for idx, existing in enumerate(merged_watch):
+                                if existing.symbol == leader.symbol:
+                                    merged_watch[idx] = leader
+                                    break
                             continue
                         merged_watch.append(leader)
                     theme_selection_day = now.date()
                     notifier.send(f"테마선정 {len(theme_groups)}개")
                     for group in theme_groups:
                         notifier.send(f"테마그룹 | {format_theme_group(group)}")
+                    # Trim to max watch candidates while keeping holds/manual.
+                    max_watch = max(1, int(args.max_watch_candidates))
+                    if len(merged_watch) > max_watch:
+                        pinned = {s for s, q in positions.items() if q > 0} | set(manual_watch_symbols)
+                        trimmed: List[Candidate] = []
+                        for c in merged_watch:
+                            if c.symbol in pinned and len(trimmed) < max_watch and not any(x.symbol == c.symbol for x in trimmed):
+                                trimmed.append(c)
+                        for c in merged_watch:
+                            if len(trimmed) >= max_watch:
+                                break
+                            if not any(x.symbol == c.symbol for x in trimmed):
+                                trimmed.append(c)
+                        merged_watch = trimmed
                     prime_chart_cache(merged_watch)
                     notifier.send(f"대장모니터링 {len(merged_watch)}개 | {watch_preview_with_chart_scores(merged_watch)}")
                     next_auto_selection_at = None
