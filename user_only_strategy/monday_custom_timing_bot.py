@@ -4140,6 +4140,15 @@ def main() -> None:
             pass
         notifier.send(f"수동모니터링 복원 | {monitoring_preview()}")
         persist_runtime_state()
+    else:
+        notifier.send("수동모니터링 복원 | 없음")
+
+    # Always report the current monitoring state at startup so empty/non-empty is unambiguous.
+    try:
+        refresh_chart_reasons_from_cache()
+    except Exception:
+        pass
+    notifier.send(f"모니터링 복원 | {monitoring_preview()}")
 
     boot_now = datetime.now(KST)
     boot_hhmm = boot_now.hour * 100 + boot_now.minute
