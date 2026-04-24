@@ -1992,6 +1992,8 @@ def parse_telegram_watch_command(text: str, known_name_map: Dict[str, str]) -> T
         return "cancel_select", []
     if monitor_key == "종목선정":
         return "select", []
+    if monitor_key in {"봇재부팅", "봇업데이트", "업데이트", "update", "restart"}:
+        return "self_update", []
     if monitor_key == "보유":
         return "holdings", []
     if "모니터" in monitor_key:
@@ -3673,6 +3675,34 @@ def main() -> None:
                 selection_cancel_requested = False
                 last_refresh = None
                 notifier.send("종목선정 요청접수")
+                continue
+            if action == "self_update":
+                repo_root = ROOT
+                try:
+                    notifier.send("업데이트 시작 | git pull --ff-only")
+                    proc = subprocess.run(
+                        ["git", "-C", str(repo_root), "pull", "--ff-only", "origin", "master"],
+                        text=True,
+                        capture_output=True,
+                        timeout=90,
+                    )
+                    out_lines = (proc.stdout or "").strip().splitlines()
+                    err_lines = (proc.stderr or "").strip().splitlines()
+                    if proc.returncode != 0:
+                        detail = err_lines[-1] if err_lines else "git pull failed"
+                        notifier.send(f"업데이트 실패 | {detail[:180]}")
+                        continue
+                    summary = out_lines[-1] if out_lines else "ok"
+                    notifier.send(f"업데이트 완료 | {summary[:180]}")
+                except Exception as exc:
+                    notifier.send(f"업데이트 예외 | {type(exc).__name__} | {str(exc)[:160]}")
+                    continue
+                try:
+                    notifier.send("재기동 시작")
+                    time.sleep(2.0)
+                    os.execv(sys.executable, [sys.executable] + sys.argv)
+                except Exception as exc:
+                    notifier.send(f"재기동 실패 | {type(exc).__name__} | {str(exc)[:160]}")
                 continue
             if action == "pause_trading":
                 trading_paused = True
