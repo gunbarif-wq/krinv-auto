@@ -2613,7 +2613,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--early-momentum-end-hhmm", type=int, default=1030, help="allow early theme-leader momentum entries until this time")
     p.add_argument("--early-momentum-min-gain-pct", type=float, default=0.015, help="minimum gain from first bar for early momentum entry")
     p.add_argument("--early-momentum-volume-mult", type=float, default=1.6, help="volume spike multiplier for early momentum entry")
-    p.add_argument("--sell-stop-loss-pct", type=float, default=0.015, help="hard stop loss from entry (e.g. 0.015=1.5%)")
+    p.add_argument("--sell-stop-loss-pct", type=float, default=0.02, help="hard stop loss from entry (e.g. 0.02=2%)")
     p.add_argument("--sell-trailing-stop-pct", type=float, default=0.02, help="trailing stop from peak (e.g. 0.02=2%)")
     p.add_argument("--sell-trailing-activate-pct", type=float, default=0.012, help="arm trailing stop after this gain from entry")
     p.add_argument("--max-order-krw", type=float, default=float(os.getenv("MAX_ORDER_KRW", "4999999")), help="per-symbol order cap under cash-only sizing")
@@ -3969,7 +3969,7 @@ def main() -> None:
                     if ok:
                         odno = str(res.get("output", {}).get("ODNO", "")).strip()
                         notifier.send(
-                            f"수동매도주문 {display_name(name, symbol)} {qty}주 {close:.0f}원 | 주문금액 {format_order_amount(close, qty)}"
+                            f"수동매도주문 {display_name(name, symbol)} {qty}주 {close:.0f}원 | 매도금액 {format_order_amount(close, qty)}"
                         )
                         sleep_with_telegram_poll(5)
                         status, filled_qty, ord_qty = wait_order_fill_status(
@@ -4004,7 +4004,7 @@ def main() -> None:
                                 positions[symbol] = remain
                                 persist_runtime_state()
                             notifier.send(
-                                f"수동매도체결 {display_name(name, symbol)} {filled_qty}/{max(ord_qty, qty)}주 | 체결금액 {format_order_amount(close, filled_qty)}"
+                                f"수동매도체결 {display_name(name, symbol)} {filled_qty}/{max(ord_qty, qty)}주 | 매도금액 {format_order_amount(close, filled_qty)}"
                             )
                             send_trade_result_message(symbol, name, filled_qty, close)
                             schedule_reselection_if_needed(now_local)
@@ -4693,7 +4693,7 @@ def main() -> None:
                     if ok:
                         odno = str(res.get("output", {}).get("ODNO", "")).strip()
                         notifier.send(
-                            f"매도주문접수 {display_name(c.name, c.symbol)} {sell_qty}주 {close:.0f}원 | 주문금액 {format_order_amount(close, sell_qty)} | {final_sell_reason}"
+                            f"매도주문접수 {display_name(c.name, c.symbol)} {sell_qty}주 {close:.0f}원 | 매도금액 {format_order_amount(close, sell_qty)} | {final_sell_reason}"
                         )
                         sleep_with_telegram_poll(5)
                         try:
@@ -4731,7 +4731,7 @@ def main() -> None:
                         if status == "filled":
                             sell_auction_wait_notified.discard(c.symbol)
                             notifier.send(
-                                f"매도체결 {display_name(c.name, c.symbol)} {filled_qty}주 | 체결금액 {format_order_amount(close, filled_qty)}"
+                                f"매도체결 {display_name(c.name, c.symbol)} {filled_qty}주 | 매도금액 {format_order_amount(close, filled_qty)}"
                             )
                             send_trade_result_message(c.symbol, c.name, filled_qty, close)
                             remain = remaining_qty if remaining_qty >= 0 else max(0, qty - filled_qty)
@@ -4746,7 +4746,7 @@ def main() -> None:
                         elif status == "partial":
                             sell_auction_wait_notified.discard(c.symbol)
                             notifier.send(
-                                f"매도부분체결 {display_name(c.name, c.symbol)} {filled_qty}/{max(ord_qty, qty)}주 | 체결금액 {format_order_amount(close, filled_qty)}"
+                                f"매도부분체결 {display_name(c.name, c.symbol)} {filled_qty}/{max(ord_qty, qty)}주 | 매도금액 {format_order_amount(close, filled_qty)}"
                             )
                             send_trade_result_message(c.symbol, c.name, filled_qty, close)
                             remain = remaining_qty if remaining_qty >= 0 else max(0, qty - max(0, filled_qty))
@@ -4785,7 +4785,7 @@ def main() -> None:
                         if status == "filled":
                             sell_auction_wait_notified.discard(c.symbol)
                             notifier.send(
-                                f"매도체결 {display_name(c.name, c.symbol)} {filled_qty}주 | 체결금액 {format_order_amount(close, filled_qty)}"
+                                f"매도체결 {display_name(c.name, c.symbol)} {filled_qty}주 | 매도금액 {format_order_amount(close, filled_qty)}"
                             )
                             send_trade_result_message(c.symbol, c.name, filled_qty, close)
                             clear_position_state(c.symbol)
@@ -4798,7 +4798,7 @@ def main() -> None:
                             profit_take_stage[c.symbol] = max(1, current_stage)
                             persist_runtime_state()
                             notifier.send(
-                                f"매도부분체결 {display_name(c.name, c.symbol)} {filled_qty}/{max(ord_qty, qty)}주 | 체결금액 {format_order_amount(close, filled_qty)}"
+                                f"매도부분체결 {display_name(c.name, c.symbol)} {filled_qty}/{max(ord_qty, qty)}주 | 매도금액 {format_order_amount(close, filled_qty)}"
                             )
                             send_trade_result_message(c.symbol, c.name, filled_qty, close)
                         elif in_auction:
