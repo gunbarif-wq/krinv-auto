@@ -2664,6 +2664,12 @@ def in_call_auction_window(now: datetime) -> bool:
     return now.weekday() < 5 and ((830 <= hhmm < 900) or (1520 <= hhmm < 1530))
 
 
+def is_hard_market_closed(now: datetime) -> bool:
+    # Paper/demo safeguard: after 15:30 KST do not send any orders.
+    hhmm = now.hour * 100 + now.minute
+    return now.weekday() < 5 and hhmm >= 1530
+
+
 def is_network_block_error(exc: Exception) -> bool:
     s = f"{type(exc).__name__} {exc}".lower()
     return (
@@ -3105,6 +3111,8 @@ def main() -> None:
     order_cooldown_until: Dict[str, datetime] = {}
     last_holdings_sync_at: datetime | None = None
     sell_auction_wait_notified: set[str] = set()
+    last_auction_skip_notice_at: datetime | None = None
+    last_close_skip_notice_at: datetime | None = None
 
     refreshed_symbol_names = refresh_symbol_name_map_from_krx(args.symbol_name_file)
     loaded_symbol_names = load_symbol_name_map(args.symbol_name_file)
@@ -3570,6 +3578,24 @@ def main() -> None:
         nonlocal last_trading_paused_notice_at
         last_trading_paused_notice_at = now_local
 
+    def maybe_notify_auction_skip(now_local: datetime) -> None:
+        nonlocal last_auction_skip_notice_at
+        if not in_call_auction_window(now_local):
+            return
+        if last_auction_skip_notice_at is not None and (now_local - last_auction_skip_notice_at).total_seconds() < 300:
+            return
+        notifier.send("동시호가구간 매매중지 | 주문 시도 안함")
+        last_auction_skip_notice_at = now_local
+
+    def maybe_notify_close_skip(now_local: datetime) -> None:
+        nonlocal last_close_skip_notice_at
+        if not is_hard_market_closed(now_local):
+            return
+        if last_close_skip_notice_at is not None and (now_local - last_close_skip_notice_at).total_seconds() < 300:
+            return
+        notifier.send("장마감 이후 매매중지 | 주문 시도 안함")
+        last_close_skip_notice_at = now_local
+
     def poll_telegram_commands(now_local: datetime) -> None:
         nonlocal telegram_update_offset, last_telegram_poll_at, last_refresh, manual_selection_requested, selection_cancel_requested, next_auto_selection_at, trading_paused, last_trading_paused_notice_at
         if not args.telegram_bot_token or not args.telegram_chat_id:
@@ -3658,6 +3684,12 @@ def main() -> None:
             if action == "buy":
                 for symbol, name in payload[:1]:
                     sync_holdings_from_account(datetime.now(KST))
+                    if is_hard_market_closed(now_local):
+                        maybe_notify_close_skip(now_local)
+                        continue
+                    if in_call_auction_window(now_local):
+                        maybe_notify_auction_skip(now_local)
+                        continue
                     holding_count = sum(1 for q in positions.values() if q > 0)
                     if positions.get(symbol, 0) <= 0 and holding_count >= int(args.max_positions):
                         notifier.send(f"수동매수거부 | 보유 {holding_count}/{int(args.max_positions)}종목 | {display_name(name, symbol)}")
@@ -3773,6 +3805,12 @@ def main() -> None:
             if action == "sell":
                 for symbol, name in payload[:1]:
                     sync_holdings_from_account(datetime.now(KST))
+                    if is_hard_market_closed(now_local):
+                        maybe_notify_close_skip(now_local)
+                        continue
+                    if in_call_auction_window(now_local):
+                        maybe_notify_auction_skip(now_local)
+                        continue
                     if trading_paused:
                         maybe_notify_trading_paused(now_local)
                         continue
@@ -4460,6 +4498,12 @@ def main() -> None:
                         profit_take_stage[c.symbol] = max(1, current_stage)
                         persist_runtime_state()
                 else:
+                    if is_hard_market_closed(now):
+                        maybe_notify_close_skip(now)
+                        continue
+                    if in_call_auction_window(now):
+                        maybe_notify_auction_skip(now)
+                        continue
                     if trading_paused:
                         maybe_notify_trading_paused(now)
                         continue
@@ -4624,6 +4668,12 @@ def main() -> None:
                 ranked = sorted(buy_candidates, key=lambda x: (x[0], -x[1]))
                 for signal_at, score, c, close, buy_tag in ranked[:buys_left]:
                     sync_holdings_from_account(now)
+                    if is_hard_market_closed(now):
+                        maybe_notify_close_skip(now)
+                        continue
+                    if in_call_auction_window(now):
+                        maybe_notify_auction_skip(now)
+                        continue
                     if trading_paused:
                         maybe_notify_trading_paused(now)
                         continue
