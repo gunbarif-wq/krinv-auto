@@ -4154,6 +4154,7 @@ def main() -> None:
     except Exception:
         pass
     notifier.send(f"모니터링 | {monitoring_preview()}")
+    last_watch_report = datetime.now(KST)
 
     boot_now = datetime.now(KST)
     boot_hhmm = boot_now.hour * 100 + boot_now.minute
