@@ -2613,7 +2613,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--early-momentum-end-hhmm", type=int, default=1030, help="allow early theme-leader momentum entries until this time")
     p.add_argument("--early-momentum-min-gain-pct", type=float, default=0.015, help="minimum gain from first bar for early momentum entry")
     p.add_argument("--early-momentum-volume-mult", type=float, default=1.6, help="volume spike multiplier for early momentum entry")
-    p.add_argument("--sell-stop-loss-pct", type=float, default=0.02, help="hard stop loss from entry (e.g. 0.02=2%)")
+    p.add_argument("--sell-stop-loss-pct", type=float, default=0.015, help="hard stop loss from entry (e.g. 0.015=1.5%)")
     p.add_argument("--sell-trailing-stop-pct", type=float, default=0.02, help="trailing stop from peak (e.g. 0.02=2%)")
     p.add_argument("--sell-trailing-activate-pct", type=float, default=0.012, help="arm trailing stop after this gain from entry")
     p.add_argument("--max-order-krw", type=float, default=float(os.getenv("MAX_ORDER_KRW", "4999999")), help="per-symbol order cap under cash-only sizing")
