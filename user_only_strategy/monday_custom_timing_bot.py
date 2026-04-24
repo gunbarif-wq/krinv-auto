@@ -2583,7 +2583,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--premarket-refresh-interval-min", type=int, default=30, help="theme/candidate refresh interval before market-open trading starts")
     p.add_argument("--market-open-hhmm", type=int, default=DEFAULT_TRADING_OPEN_HHMM)
     p.add_argument("--market-close-hhmm", type=int, default=DEFAULT_TRADING_CLOSE_HHMM)
-    p.add_argument("--watch-report-interval-min", type=int, default=10, help="tracking report interval while watching selected symbols")
+    p.add_argument("--watch-report-interval-min", type=int, default=30, help="monitoring status report interval (minutes)")
     p.add_argument("--max-watch-candidates", type=int, default=4, help="maximum symbols to monitor at once")
     p.add_argument("--initial-cash", type=float, default=10_000_000, help="account seed cash for position sizing")
     p.add_argument("--position-size-pct", type=float, default=0.50, help="max position size per symbol (0~1)")
@@ -3464,6 +3464,18 @@ def main() -> None:
             f"재선정예약 | 보유 {holding_count}/{int(args.max_positions)}종목 | 모니터링 {nonholding_watch_count}/{required_watch_count}"
         )
 
+    def maybe_send_watch_report(now_local: datetime) -> None:
+        nonlocal last_watch_report
+        interval_min = max(1, int(args.watch_report_interval_min))
+        if last_watch_report is not None and (now_local - last_watch_report).total_seconds() < interval_min * 60:
+            return
+        try:
+            refresh_chart_reasons_from_cache()
+        except Exception:
+            pass
+        notifier.send(f"모니터링 | {monitoring_preview()}")
+        last_watch_report = now_local
+
     def set_position_entry(symbol: str, qty: int, price: float) -> None:
         positions[symbol] = max(0, int(qty))
         entry_price[symbol] = float(price)
@@ -4172,6 +4184,7 @@ def main() -> None:
         poll_telegram_commands(now)
         sync_holdings_from_account(now)
         schedule_reselection_if_needed(now)
+        maybe_send_watch_report(now)
 
         # Auto theme-selection schedule:
         # - Start at 08:01 (or configured) once per day.
