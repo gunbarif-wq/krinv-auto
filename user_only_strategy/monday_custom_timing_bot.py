@@ -3258,7 +3258,7 @@ def main() -> None:
                 refresh_chart_reasons_from_cache()
             except Exception:
                 pass
-            notifier.send(f"현재 모니터링종목 | {monitoring_preview()}")
+            notifier.send(f"모니터링 | {monitoring_preview()}")
 
     def persist_symbol_name_map() -> None:
         merged = load_symbol_name_map(args.symbol_name_file)
@@ -3756,7 +3756,7 @@ def main() -> None:
             if action == "status":
                 refresh_chart_reasons_from_cache()
                 current_watch = monitoring_preview()
-                notifier.send(f"현재 모니터링종목 | {current_watch}")
+                notifier.send(f"모니터링 | {current_watch}")
                 continue
             if action == "holdings":
                 sync_holdings_from_account(datetime.now(KST))
@@ -4020,7 +4020,7 @@ def main() -> None:
                 except Exception:
                     pass
                 current_watch = monitoring_preview()
-                notifier.send(f"현재 모니터링종목 | {current_watch}")
+                notifier.send(f"모니터링 | {current_watch}")
                 schedule_reselection_if_needed(now_local)
                 if not watch_candidates and not is_daily_trade_finished(now_local.date()):
                     last_refresh = None
@@ -4134,21 +4134,14 @@ def main() -> None:
     if manual_watch_symbols:
         merge_manual_watch_candidates()
         prime_chart_cache(watch_candidates)
-        try:
-            refresh_chart_reasons_from_cache()
-        except Exception:
-            pass
-        notifier.send(f"수동모니터링 복원 | {monitoring_preview()}")
         persist_runtime_state()
-    else:
-        notifier.send("수동모니터링 복원 | 없음")
 
-    # Always report the current monitoring state at startup so empty/non-empty is unambiguous.
+    # Unified startup message: only the current monitoring state.
     try:
         refresh_chart_reasons_from_cache()
     except Exception:
         pass
-    notifier.send(f"모니터링 복원 | {monitoring_preview()}")
+    notifier.send(f"모니터링 | {monitoring_preview()}")
 
     boot_now = datetime.now(KST)
     boot_hhmm = boot_now.hour * 100 + boot_now.minute
