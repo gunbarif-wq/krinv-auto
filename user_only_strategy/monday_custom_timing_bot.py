@@ -32,18 +32,24 @@ from user_only_strategy.krx_symbol_names import (  # noqa: E402
     refresh_symbol_name_map_from_krx,
     save_symbol_name_map,
 )
+from user_only_strategy.core import commands as core_commands  # noqa: E402
+from user_only_strategy.core import notifier as core_notifier  # noqa: E402
+from user_only_strategy.core import policy as core_policy  # noqa: E402
 
 
 KST = ZoneInfo("Asia/Seoul")
 VTS_BASE_URL = "https://openapivts.koreainvestment.com:29443"
 PROD_BASE_URL = "https://openapi.koreainvestment.com:9443"
-DEFAULT_TRADING_OPEN_HHMM = 850
+DEFAULT_TRADING_OPEN_HHMM = 900
 DEFAULT_TRADING_CLOSE_HHMM = 1530
 DEFAULT_SEARCH_START_HHMM = 801
 DEFAULT_MINUTE_MARKET_CODE = "UN"
 DEFAULT_WATCH_STATE_FILE = str(ROOT / "user_only_strategy" / "watch_state.json")
 DEFAULT_BAR_CACHE_FILE = str(ROOT / "logs" / "bar_cache.json")
 CHART_WINDOW_BARS = 60
+
+# Global notification switch (set in main() after loading persisted state).
+ALERTS_MUTED = False
 SYMBOL_ALIAS_MAP = {
     "하이닉스": "000660",
     "sk하이닉스": "000660",
@@ -877,6 +883,7 @@ def load_watch_state(path_text: str) -> Dict[str, object]:
         "daily_trade_finished_day": "",
         "telegram_update_offset": 0,
         "last_self_update_at": "",
+        "alerts_muted": False,
     }
     if not path.exists():
         return default
@@ -892,6 +899,8 @@ def load_watch_state(path_text: str) -> Dict[str, object]:
         if isinstance(default_value, list) and isinstance(value, list):
             merged[key] = value
         elif isinstance(default_value, dict) and isinstance(value, dict):
+            merged[key] = value
+        elif isinstance(default_value, bool) and isinstance(value, bool):
             merged[key] = value
         elif isinstance(default_value, int) and isinstance(value, int):
             merged[key] = value
@@ -955,6 +964,7 @@ def save_watch_state(
     daily_trade_finished_day: datetime.date | None,
     telegram_update_offset: int = 0,
     last_self_update_at: str = "",
+    alerts_muted: bool = False,
 ) -> None:
     path = Path(path_text).expanduser()
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -975,6 +985,7 @@ def save_watch_state(
         "daily_trade_finished_day": daily_trade_finished_day.isoformat() if hasattr(daily_trade_finished_day, "isoformat") else "",
         "telegram_update_offset": max(0, int(telegram_update_offset)),
         "last_self_update_at": str(last_self_update_at or "").strip(),
+        "alerts_muted": bool(alerts_muted),
     }
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
@@ -1993,6 +2004,9 @@ def parse_telegram_watch_command(text: str, known_name_map: Dict[str, str]) -> T
     raw = str(text or "").strip()
     if not raw:
         return "ignore", []
+    ctrl = core_commands.parse_control_command(raw)
+    if ctrl is not None:
+        return ctrl, []
     monitor_key = re.sub(r"\s+", "", raw)
     if monitor_key == "매매중지":
         return "pause_trading", []
@@ -2004,6 +2018,10 @@ def parse_telegram_watch_command(text: str, known_name_map: Dict[str, str]) -> T
         return "select", []
     if monitor_key in {"봇재부팅", "봇업데이트", "업데이트", "update", "restart"}:
         return "self_update", []
+    if monitor_key == "알림중지":
+        return "mute_alerts", []
+    if monitor_key == "알림재개":
+        return "unmute_alerts", []
     if monitor_key == "보유":
         return "holdings", []
     if "모니터" in monitor_key:
@@ -2516,49 +2534,16 @@ def minute_filter(
 
 class Notifier:
     def __init__(self, log_path: Path, telegram_token: str, telegram_chat_id: str, message_prefix: str = ""):
-        self.log_path = log_path
-        self.log_path.parent.mkdir(parents=True, exist_ok=True)
-        self.telegram_token = telegram_token.strip()
-        self.telegram_chat_id = telegram_chat_id.strip()
-        self.message_prefix = message_prefix.strip()
+        cfg = core_notifier.NotifierConfig(
+            log_path=log_path,
+            telegram_token=telegram_token,
+            telegram_chat_id=telegram_chat_id,
+            message_prefix=message_prefix,
+        )
+        self._impl = core_notifier.Notifier(cfg, kst_tz=KST, is_alerts_muted=lambda: ALERTS_MUTED)
 
     def send(self, text: str) -> None:
-        ts = datetime.now(KST).strftime("%H:%M:%S")
-        body = f"[{self.message_prefix}] {text}" if self.message_prefix else text
-        line = f"[{ts}] {body}"
-        print(line)
-        with self.log_path.open("a", encoding="utf-8") as f:
-            f.write(line + "\n")
-        if self.telegram_token and self.telegram_chat_id:
-            sent = False
-            try:
-                url = f"https://api.telegram.org/bot{self.telegram_token}/sendMessage"
-                r = requests.post(url, json={"chat_id": self.telegram_chat_id, "text": line}, timeout=8)
-                sent = bool(getattr(r, "ok", False))
-            except Exception:
-                sent = False
-            if not sent:
-                try:
-                    url = f"https://api.telegram.org/bot{self.telegram_token}/sendMessage"
-                    subprocess.run(
-                        [
-                            "curl.exe" if os.name == "nt" else "curl",
-                            "-sS",
-                            "-X",
-                            "POST",
-                            url,
-                            "-d",
-                            f"chat_id={self.telegram_chat_id}",
-                            "--data-urlencode",
-                            f"text={line}",
-                        ],
-                        check=False,
-                        timeout=8,
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL,
-                    )
-                except Exception:
-                    pass
+        self._impl.send(text)
 
 
 def parse_args() -> argparse.Namespace:
@@ -3339,6 +3324,8 @@ def main() -> None:
 
     telegram_update_offset = max(0, _to_int(saved_state.get("telegram_update_offset")))
     last_self_update_at_text = str(saved_state.get("last_self_update_at", "")).strip()
+    global ALERTS_MUTED
+    ALERTS_MUTED = bool(saved_state.get("alerts_muted", False))
 
     def persist_runtime_state() -> None:
         save_watch_state(
@@ -3358,6 +3345,7 @@ def main() -> None:
             daily_trade_finished_day=daily_trade_finished_day,
             telegram_update_offset=telegram_update_offset,
             last_self_update_at=last_self_update_at_text,
+            alerts_muted=ALERTS_MUTED,
         )
 
     def notify_net_error(exc: Exception) -> int:
@@ -3706,6 +3694,16 @@ def main() -> None:
                 selection_cancel_requested = False
                 last_refresh = None
                 notifier.send("종목선정 요청접수")
+                continue
+            if action == "mute_alerts":
+                notifier.send("알림중지 설정")
+                ALERTS_MUTED = True
+                persist_runtime_state()
+                continue
+            if action == "unmute_alerts":
+                ALERTS_MUTED = False
+                persist_runtime_state()
+                notifier.send("알림재개 설정")
                 continue
             if action == "self_update":
                 repo_root = ROOT
@@ -4525,6 +4523,40 @@ def main() -> None:
                 peak_price[c.symbol] = pp
                 profit_pct = ((float(close) / ep) - 1.0) if ep > 0 else 0.0
                 current_stage = int(profit_take_stage.get(c.symbol, 0) or 0)
+                # Limit-up exception policy:
+                # - Base: sell by sell-classifier/indicators.
+                # - If limit-up is held into close (near 15:20+ and close near limit-up), defer sell to next day.
+                # - If limit-up touched but collapses >=3% from limit-up price, sell immediately.
+                limit_up_price = 0.0
+                touched_limit_up_today = False
+                holding_limit_up_today = False
+                limit_up_breakdown = False
+                try:
+                    prev = fetch_single_previous_day_stat(args.base_url, token, args.app_key, args.app_secret, c.symbol)
+                    limit_up_price = extract_limit_up_price(prev)
+                    if limit_up_price > 0:
+                        today_ymd = int(datetime.now(KST).strftime("%Y%m%d"))
+                        today_rows = [r for r in rows if int(r.get("date", 0.0)) // 1000000 == today_ymd]
+                        if today_rows:
+                            today_high = max(float(r.get("high", 0.0)) for r in today_rows)
+                            touched_limit_up_today = today_high >= limit_up_price * 0.999
+                            holding_limit_up_today = (
+                                touched_limit_up_today
+                                and (now.hour * 100 + now.minute) >= 1520
+                                and float(close) >= limit_up_price * 0.997
+                            )
+                            limit_up_breakdown = touched_limit_up_today and float(close) <= limit_up_price * 0.97
+                        if holding_limit_up_today:
+                            limit_up_hold_day[c.symbol] = now.date()
+                            persist_runtime_state()
+                except Exception:
+                    pass
+                force_sell_next_day = bool(
+                    limit_up_hold_day.get(c.symbol) is not None and limit_up_hold_day.get(c.symbol) < now.date()
+                )
+                if holding_limit_up_today and not limit_up_breakdown:
+                    # Defer selling until next day if still held at/near limit-up into the close.
+                    continue
                 if current_stage < 1 and profit_pct >= 0.05:
                     current_stage = 1
                     profit_take_stage[c.symbol] = 1
@@ -4598,11 +4630,17 @@ def main() -> None:
                     or trailing_ok
                     or chart_indicator_sell
                     or hold_time_sell
+                    or limit_up_breakdown
+                    or force_sell_next_day
                 )
                 reason_parts: List[str] = [
                     f"차트:{strip_chart_bonus(chart_sell_reason)}",
                     f"매도결합={combined_sell_score:.2f}(차트{sell_chart_weight:.2f}+지표{indicator_sell_weight:.2f})",
                 ]
+                if limit_up_breakdown:
+                    reason_parts.append("상한가붕괴(-3%)")
+                elif force_sell_next_day:
+                    reason_parts.append("상한가유지 익일매도")
                 if chart_sell_strong:
                     reason_parts.append(f"차트붕괴강신호({chart_sell_prob:.2f}>={chart_sell_strong_threshold:.2f})")
                 elif chart_indicator_sell:
