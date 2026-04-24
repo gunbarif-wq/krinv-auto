@@ -50,6 +50,7 @@ CHART_WINDOW_BARS = 60
 
 # Global notification switch (set in main() after loading persisted state).
 ALERTS_MUTED = False
+FORCE_BOOT_NOTIFY_ONCE = False
 SYMBOL_ALIAS_MAP = {
     "하이닉스": "000660",
     "sk하이닉스": "000660",
@@ -884,6 +885,7 @@ def load_watch_state(path_text: str) -> Dict[str, object]:
         "telegram_update_offset": 0,
         "last_self_update_at": "",
         "alerts_muted": False,
+        "force_boot_notify_once": False,
     }
     if not path.exists():
         return default
@@ -965,6 +967,7 @@ def save_watch_state(
     telegram_update_offset: int = 0,
     last_self_update_at: str = "",
     alerts_muted: bool = False,
+    force_boot_notify_once: bool = False,
 ) -> None:
     path = Path(path_text).expanduser()
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -986,6 +989,7 @@ def save_watch_state(
         "telegram_update_offset": max(0, int(telegram_update_offset)),
         "last_self_update_at": str(last_self_update_at or "").strip(),
         "alerts_muted": bool(alerts_muted),
+        "force_boot_notify_once": bool(force_boot_notify_once),
     }
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
@@ -2545,6 +2549,9 @@ class Notifier:
     def send(self, text: str) -> None:
         self._impl.send(text)
 
+    def send_force(self, text: str) -> None:
+        self._impl.send_force(text)
+
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Custom timing bot (user rule only)")
@@ -3326,6 +3333,8 @@ def main() -> None:
     last_self_update_at_text = str(saved_state.get("last_self_update_at", "")).strip()
     global ALERTS_MUTED
     ALERTS_MUTED = bool(saved_state.get("alerts_muted", False))
+    global FORCE_BOOT_NOTIFY_ONCE
+    FORCE_BOOT_NOTIFY_ONCE = bool(saved_state.get("force_boot_notify_once", False))
 
     def persist_runtime_state() -> None:
         save_watch_state(
@@ -3346,6 +3355,7 @@ def main() -> None:
             telegram_update_offset=telegram_update_offset,
             last_self_update_at=last_self_update_at_text,
             alerts_muted=ALERTS_MUTED,
+            force_boot_notify_once=FORCE_BOOT_NOTIFY_ONCE,
         )
 
     def notify_net_error(exc: Exception) -> int:
@@ -3739,8 +3749,11 @@ def main() -> None:
                     continue
                 try:
                     # Persist the latest telegram offset and last update timestamp before exec.
+                    # Update implies "resume alerts": user expects post-update monitoring until close.
+                    ALERTS_MUTED = False
+                    FORCE_BOOT_NOTIFY_ONCE = True
                     persist_runtime_state()
-                    notifier.send("재기동 시작")
+                    notifier.send_force("재기동 시작")
                     time.sleep(2.0)
                     os.execv(sys.executable, [sys.executable] + sys.argv)
                 except Exception as exc:
@@ -4151,7 +4164,12 @@ def main() -> None:
         refresh_chart_reasons_from_cache()
     except Exception:
         pass
-    notifier.send(f"모니터링 | {monitoring_preview()}")
+    if FORCE_BOOT_NOTIFY_ONCE:
+        notifier.send_force(f"모니터링 | {monitoring_preview()}")
+        FORCE_BOOT_NOTIFY_ONCE = False
+        persist_runtime_state()
+    else:
+        notifier.send(f"모니터링 | {monitoring_preview()}")
     last_watch_report = datetime.now(KST)
 
     boot_now = datetime.now(KST)

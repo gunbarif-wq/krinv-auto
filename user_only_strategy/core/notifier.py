@@ -74,3 +74,20 @@ class Notifier:
                 except Exception:
                     pass
 
+    def send_force(self, text: str) -> None:
+        # Force-send regardless of time/mute policy. Use sparingly for boot/update confirmation.
+        now_local = datetime.now(self._kst_tz)
+        ts = now_local.strftime("%H:%M:%S")
+        body = f"[{self.message_prefix}] {text}" if self.message_prefix else text
+        line = f"[{ts}] {body}"
+
+        print(line)
+        with self.log_path.open("a", encoding="utf-8") as f:
+            f.write(line + "\n")
+
+        if self.telegram_token and self.telegram_chat_id:
+            try:
+                url = f"https://api.telegram.org/bot{self.telegram_token}/sendMessage"
+                requests.post(url, json={"chat_id": self.telegram_chat_id, "text": line}, timeout=8)
+            except Exception:
+                pass
