@@ -3244,6 +3244,10 @@ def main() -> None:
         if added_any or stale_symbols:
             persist_symbol_name_map()
             persist_runtime_state()
+            try:
+                refresh_chart_reasons_from_cache()
+            except Exception:
+                pass
             notifier.send(f"현재 모니터링종목 | {monitoring_preview()}")
 
     def persist_symbol_name_map() -> None:
@@ -3983,6 +3987,10 @@ def main() -> None:
                     watch_candidates[:] = [c for c in watch_candidates if c.symbol != symbol]
                     signal_first_seen_at.pop(symbol, None)
                 persist_runtime_state()
+                try:
+                    refresh_chart_reasons_from_cache()
+                except Exception:
+                    pass
                 current_watch = monitoring_preview()
                 notifier.send(f"현재 모니터링종목 | {current_watch}")
                 schedule_reselection_if_needed(now_local)
@@ -4027,6 +4035,10 @@ def main() -> None:
                 if added_names:
                     persist_symbol_name_map()
                     persist_runtime_state()
+                    try:
+                        refresh_chart_reasons_from_cache()
+                    except Exception:
+                        pass
                     current_watch = monitoring_preview()
                     notifier.send(f"현재 모니터링종목 | {current_watch}")
                     if not watch_candidates and not is_daily_trade_finished(now_local.date()):
@@ -4094,6 +4106,10 @@ def main() -> None:
     if manual_watch_symbols:
         merge_manual_watch_candidates()
         prime_chart_cache(watch_candidates)
+        try:
+            refresh_chart_reasons_from_cache()
+        except Exception:
+            pass
         notifier.send(f"수동모니터링 복원 | {monitoring_preview()}")
         persist_runtime_state()
 
