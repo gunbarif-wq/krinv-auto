@@ -484,6 +484,29 @@ def confirm_holding_qty(
     return int((holdings.get(symbol) or {}).get("qty", 0))
 
 
+def reconcile_sell_fill_status(
+    status: str,
+    filled_qty: int,
+    ord_qty: int,
+    expected_qty: int,
+    remaining_qty: int,
+) -> Tuple[str, int, int]:
+    expected = max(0, int(expected_qty))
+    filled = max(0, int(filled_qty))
+    ordered = max(0, int(ord_qty))
+    remaining = int(remaining_qty)
+    if remaining < 0:
+        return status, filled, ordered
+    sold_by_balance = max(0, expected - remaining)
+    filled = max(filled, sold_by_balance)
+    ordered = max(ordered, expected)
+    if remaining <= 0 and expected > 0:
+        return ("filled", max(filled, expected), ordered)
+    if sold_by_balance > 0:
+        return ("partial", filled, ordered)
+    return (status, filled, ordered)
+
+
 def balance_inquiry_tr_id(base_url: str) -> str:
     return "VTTC8434R" if is_demo_base_url(base_url) else "TTTC8434R"
 
@@ -3081,6 +3104,7 @@ def main() -> None:
     last_net_alert_at: datetime | None = None
     order_cooldown_until: Dict[str, datetime] = {}
     last_holdings_sync_at: datetime | None = None
+    sell_auction_wait_notified: set[str] = set()
 
     refreshed_symbol_names = refresh_symbol_name_map_from_krx(args.symbol_name_file)
     loaded_symbol_names = load_symbol_name_map(args.symbol_name_file)
@@ -3124,8 +3148,13 @@ def main() -> None:
             )
         except Exception:
             return
-        if not holdings:
-            return
+        stale_symbols = [
+            symbol for symbol, qty in list(positions.items())
+            if int(qty) > 0 and symbol not in holdings
+        ]
+        for symbol in stale_symbols:
+            clear_position_state(symbol)
+            sell_auction_wait_notified.discard(symbol)
         added_any = False
         for symbol, row in holdings.items():
             qty = _to_int(row.get("qty"))
@@ -3161,7 +3190,7 @@ def main() -> None:
                 if all(candidate.symbol != symbol for candidate in watch_candidates):
                     watch_candidates.append(restored)
                 notifier.send(f"계좌보유 감지 | {display_name(restored.name, symbol)} {qty}주")
-        if added_any:
+        if added_any or stale_symbols:
             persist_symbol_name_map()
             persist_runtime_state()
             notifier.send(f"현재 모니터링종목 | {monitoring_preview()}")
@@ -4485,11 +4514,15 @@ def main() -> None:
                             acnt_prdt_cd=args.acnt_prdt_cd,
                             symbol=c.symbol,
                         )
-                        if remaining_qty == 0:
-                            status = "filled"
-                            filled_qty = max(filled_qty, sell_qty)
-                            ord_qty = max(ord_qty, sell_qty)
+                        status, filled_qty, ord_qty = reconcile_sell_fill_status(
+                            status=status,
+                            filled_qty=filled_qty,
+                            ord_qty=ord_qty,
+                            expected_qty=sell_qty,
+                            remaining_qty=remaining_qty,
+                        )
                         if status == "filled":
+                            sell_auction_wait_notified.discard(c.symbol)
                             notifier.send(
                                 f"매도체결 {display_name(c.name, c.symbol)} {filled_qty}주 | 체결금액 {format_order_amount(close, filled_qty)}"
                             )
@@ -4504,6 +4537,7 @@ def main() -> None:
                                 profit_take_stage[c.symbol] = max(1, current_stage)
                                 persist_runtime_state()
                         elif status == "partial":
+                            sell_auction_wait_notified.discard(c.symbol)
                             notifier.send(
                                 f"매도부분체결 {display_name(c.name, c.symbol)} {filled_qty}/{max(ord_qty, qty)}주 | 체결금액 {format_order_amount(close, filled_qty)}"
                             )
@@ -4518,13 +4552,54 @@ def main() -> None:
                                 finish_if_all_closed(carryover_exit)
                         else:
                             if in_auction:
-                                notifier.send(f"매도동시호가대기 {display_name(c.name, c.symbol)} {filled_qty}/{max(ord_qty, qty)}주")
+                                if c.symbol not in sell_auction_wait_notified:
+                                    notifier.send(f"매도동시호가대기 {display_name(c.name, c.symbol)} {filled_qty}/{max(ord_qty, qty)}주")
+                                    sell_auction_wait_notified.add(c.symbol)
                             else:
+                                sell_auction_wait_notified.discard(c.symbol)
                                 notifier.send(f"매도미체결 {display_name(c.name, c.symbol)} {filled_qty}/{max(ord_qty, qty)}주")
                     else:
-                        if in_auction:
+                        remaining_qty = confirm_holding_qty(
+                            base_url=args.base_url,
+                            token=token,
+                            app_key=args.app_key,
+                            app_secret=args.app_secret,
+                            cano=args.cano,
+                            acnt_prdt_cd=args.acnt_prdt_cd,
+                            symbol=c.symbol,
+                        )
+                        status, filled_qty, ord_qty = reconcile_sell_fill_status(
+                            status="pending",
+                            filled_qty=0,
+                            ord_qty=sell_qty,
+                            expected_qty=sell_qty,
+                            remaining_qty=remaining_qty,
+                        )
+                        if status == "filled":
+                            sell_auction_wait_notified.discard(c.symbol)
+                            notifier.send(
+                                f"매도체결 {display_name(c.name, c.symbol)} {filled_qty}주 | 체결금액 {format_order_amount(close, filled_qty)}"
+                            )
+                            send_trade_result_message(c.symbol, c.name, filled_qty, close)
+                            clear_position_state(c.symbol)
+                            schedule_reselection_if_needed(now)
+                            finish_if_all_closed(carryover_exit)
+                        elif status == "partial":
+                            sell_auction_wait_notified.discard(c.symbol)
+                            remain = max(0, remaining_qty)
+                            positions[c.symbol] = remain
+                            profit_take_stage[c.symbol] = max(1, current_stage)
+                            persist_runtime_state()
+                            notifier.send(
+                                f"매도부분체결 {display_name(c.name, c.symbol)} {filled_qty}/{max(ord_qty, qty)}주 | 체결금액 {format_order_amount(close, filled_qty)}"
+                            )
+                            send_trade_result_message(c.symbol, c.name, filled_qty, close)
+                        elif in_auction:
+                            if c.symbol not in sell_auction_wait_notified:
                                 notifier.send(f"매도동시호가대기 {display_name(c.name, c.symbol)} {sell_qty}주 {close:.0f}원 | {format_kis_error(res)}")
+                                sell_auction_wait_notified.add(c.symbol)
                         else:
+                            sell_auction_wait_notified.discard(c.symbol)
                             notifier.send(f"매도실패 {display_name(c.name, c.symbol)} {sell_qty}주 {close:.0f}원")
         for c in watch_candidates:
             if c.symbol not in signaled_this_cycle and positions.get(c.symbol, 0) <= 0:
