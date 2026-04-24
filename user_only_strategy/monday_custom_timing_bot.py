@@ -1015,6 +1015,7 @@ def fetch_minute_ohlcv(
     cursor_time = str(cursor_time or now.strftime("%H%M%S"))
     out_map: Dict[str, Dict[str, float]] = {}
     nonmatching_dates: Dict[str, int] = {}
+    effective_ymd: str | None = None
 
     # KIS returns roughly 30 one-minute rows per request. The NXT window can
     # span about 12 hours, so the old fixed 14-page cap cut off morning data
@@ -1046,9 +1047,21 @@ def fetch_minute_ohlcv(
             t = str(r.get("stck_cntg_hour", ""))
             if len(t) != 6:
                 continue
-            if d != ymd:
-                nonmatching_dates[d] = nonmatching_dates.get(d, 0) + 1
+            if not (len(d) == 8 and d.isdigit()):
                 continue
+            if effective_ymd is None:
+                effective_ymd = ymd
+            if d != effective_ymd:
+                nonmatching_dates[d] = nonmatching_dates.get(d, 0) + 1
+                # If the server ignores requested ymd and consistently returns another date,
+                # follow the response date instead of dropping all rows.
+                if ymd and effective_ymd == ymd and nonmatching_dates.get(d, 0) >= 20:
+                    print(
+                        f"[WARN] minute_ohlcv_follow_date symbol={symbol} requested_ymd={ymd} -> effective_ymd={d}"
+                    )
+                    effective_ymd = d
+                if d != effective_ymd:
+                    continue
             key = f"{d}{t}"
             if min_time is None or t < min_time:
                 min_time = t
