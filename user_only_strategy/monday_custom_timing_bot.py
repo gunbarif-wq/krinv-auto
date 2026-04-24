@@ -1014,6 +1014,7 @@ def fetch_minute_ohlcv(
     ymd = str(ymd or now.strftime("%Y%m%d"))
     cursor_time = str(cursor_time or now.strftime("%H%M%S"))
     out_map: Dict[str, Dict[str, float]] = {}
+    nonmatching_dates: Dict[str, int] = {}
 
     # KIS returns roughly 30 one-minute rows per request. The NXT window can
     # span about 12 hours, so the old fixed 14-page cap cut off morning data
@@ -1043,7 +1044,10 @@ def fetch_minute_ohlcv(
         for r in rows:
             d = str(r.get("stck_bsop_date", ""))
             t = str(r.get("stck_cntg_hour", ""))
-            if d != ymd or len(t) != 6:
+            if len(t) != 6:
+                continue
+            if d != ymd:
+                nonmatching_dates[d] = nonmatching_dates.get(d, 0) + 1
                 continue
             key = f"{d}{t}"
             if min_time is None or t < min_time:
@@ -1065,6 +1069,13 @@ def fetch_minute_ohlcv(
         if len(out_map) >= count_hint * 2:
             break
         time.sleep(0.2)
+
+    if not out_map and nonmatching_dates:
+        # Diagnostics for "prev-day padding doesn't work" reports: if the endpoint ignores
+        # FID_INPUT_DATE_1 in some environments (or returns a different date), we'll see it here.
+        top = sorted(nonmatching_dates.items(), key=lambda x: -x[1])[:3]
+        sample = ", ".join([f"{d}:{n}" for d, n in top])
+        print(f"[WARN] minute_ohlcv_date_mismatch symbol={symbol} requested_ymd={ymd} got={sample}")
 
     rows = [out_map[k] for k in sorted(out_map.keys())]
     return rows[-max(30, count_hint) :]
