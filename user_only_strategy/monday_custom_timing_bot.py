@@ -3026,6 +3026,7 @@ def main() -> None:
         message_prefix="",
     )
     notifier.send("봇기동/재기동")
+    notifier.send(f"설정확인 | chart_window={CHART_WINDOW_BARS} | file={__file__}")
     buy_chart_model_path = resolve_chart_model_path(
         args.chart_classifier_model,
         "data/chart_models/live50_30d_final.pkl",
