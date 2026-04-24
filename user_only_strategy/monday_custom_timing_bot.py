@@ -875,6 +875,8 @@ def load_watch_state(path_text: str) -> Dict[str, object]:
         "strict_filtered_count": 0,
         "theme_selection_day": "",
         "daily_trade_finished_day": "",
+        "telegram_update_offset": 0,
+        "last_self_update_at": "",
     }
     if not path.exists():
         return default
@@ -890,6 +892,10 @@ def load_watch_state(path_text: str) -> Dict[str, object]:
         if isinstance(default_value, list) and isinstance(value, list):
             merged[key] = value
         elif isinstance(default_value, dict) and isinstance(value, dict):
+            merged[key] = value
+        elif isinstance(default_value, int) and isinstance(value, int):
+            merged[key] = value
+        elif isinstance(default_value, str) and isinstance(value, str):
             merged[key] = value
     return merged
 
@@ -947,6 +953,8 @@ def save_watch_state(
     strict_filtered_count: int,
     theme_selection_day: datetime.date | None,
     daily_trade_finished_day: datetime.date | None,
+    telegram_update_offset: int = 0,
+    last_self_update_at: str = "",
 ) -> None:
     path = Path(path_text).expanduser()
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -965,6 +973,8 @@ def save_watch_state(
         "strict_filtered_count": max(0, int(strict_filtered_count)),
         "theme_selection_day": theme_selection_day.isoformat() if hasattr(theme_selection_day, "isoformat") else "",
         "daily_trade_finished_day": daily_trade_finished_day.isoformat() if hasattr(daily_trade_finished_day, "isoformat") else "",
+        "telegram_update_offset": max(0, int(telegram_update_offset)),
+        "last_self_update_at": str(last_self_update_at or "").strip(),
     }
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
@@ -3327,6 +3337,9 @@ def main() -> None:
         if restored_candidate.name:
             known_name_map[restored_candidate.symbol] = restored_candidate.name
 
+    telegram_update_offset = max(0, _to_int(saved_state.get("telegram_update_offset")))
+    last_self_update_at_text = str(saved_state.get("last_self_update_at", "")).strip()
+
     def persist_runtime_state() -> None:
         save_watch_state(
             args.watch_state_file,
@@ -3343,6 +3356,8 @@ def main() -> None:
             strict_filtered_count=strict_filtered_count,
             theme_selection_day=theme_selection_day,
             daily_trade_finished_day=daily_trade_finished_day,
+            telegram_update_offset=telegram_update_offset,
+            last_self_update_at=last_self_update_at_text,
         )
 
     def notify_net_error(exc: Exception) -> int:
@@ -3682,6 +3697,17 @@ def main() -> None:
                 continue
             if action == "self_update":
                 repo_root = ROOT
+                now_text = datetime.now(KST).strftime("%Y-%m-%d %H:%M:%S")
+                # Prevent restart loops if telegram update offset is not applied yet.
+                try:
+                    if last_self_update_at_text:
+                        last_dt = datetime.fromisoformat(last_self_update_at_text.replace(" ", "T"))
+                        if (datetime.now(KST) - last_dt).total_seconds() < 90:
+                            notifier.send("업데이트 무시 | 직전 재기동 직후")
+                            continue
+                except Exception:
+                    pass
+                last_self_update_at_text = now_text
                 try:
                     notifier.send("업데이트 시작 | git pull --ff-only")
                     proc = subprocess.run(
@@ -3702,6 +3728,8 @@ def main() -> None:
                     notifier.send(f"업데이트 예외 | {type(exc).__name__} | {str(exc)[:160]}")
                     continue
                 try:
+                    # Persist the latest telegram offset and last update timestamp before exec.
+                    persist_runtime_state()
                     notifier.send("재기동 시작")
                     time.sleep(2.0)
                     os.execv(sys.executable, [sys.executable] + sys.argv)
