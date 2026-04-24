@@ -43,6 +43,7 @@ DEFAULT_SEARCH_START_HHMM = 801
 DEFAULT_MINUTE_MARKET_CODE = "UN"
 DEFAULT_WATCH_STATE_FILE = str(ROOT / "user_only_strategy" / "watch_state.json")
 DEFAULT_BAR_CACHE_FILE = str(ROOT / "logs" / "bar_cache.json")
+CHART_WINDOW_BARS = 60
 SYMBOL_ALIAS_MAP = {
     "하이닉스": "000660",
     "sk하이닉스": "000660",
@@ -1079,7 +1080,7 @@ def ensure_chart_window_rows(
     symbol: str,
     market_code: str,
     bar_minutes: int,
-    min_rows: int = 40,
+    min_rows: int = CHART_WINDOW_BARS,
     bar_cache: Dict[str, List[Dict[str, float]]] | None = None,
 ) -> List[Dict[str, float]]:
     if len(rows) >= min_rows:
@@ -1103,21 +1104,36 @@ def ensure_chart_window_rows(
     try:
         today = datetime.now(KST).date()
         prev_day = _previous_business_day(today)
+        fetch_hint = max(180, raw_count_hint_for_resampled_bars(min_rows, bar_minutes))
         prev_rows_raw = fetch_minute_ohlcv(
             base_url=base_url,
             token=token,
             app_key=app_key,
             app_secret=app_secret,
             symbol=symbol,
-            count_hint=max(120, raw_count_hint_for_resampled_bars(min_rows, bar_minutes)),
+            count_hint=fetch_hint,
             market_code=market_code,
             ymd=prev_day.strftime("%Y%m%d"),
             cursor_time="153000",
         )
-        prev_rows = resample_bars(prev_rows_raw, bar_minutes=bar_minutes)
-        if not prev_rows:
-            return rows
-        merged = _merge_rows(prev_rows, rows)
+        prev_rows = resample_bars(prev_rows_raw, bar_minutes=bar_minutes) if prev_rows_raw else []
+        merged = _merge_rows(prev_rows, rows) if prev_rows else rows
+        if len(merged) < min_rows:
+            prev2_day = _previous_business_day(prev_day)
+            prev2_rows_raw = fetch_minute_ohlcv(
+                base_url=base_url,
+                token=token,
+                app_key=app_key,
+                app_secret=app_secret,
+                symbol=symbol,
+                count_hint=fetch_hint,
+                market_code=market_code,
+                ymd=prev2_day.strftime("%Y%m%d"),
+                cursor_time="153000",
+            )
+            prev2_rows = resample_bars(prev2_rows_raw, bar_minutes=bar_minutes) if prev2_rows_raw else []
+            if prev2_rows:
+                merged = _merge_rows(prev2_rows, merged)
         if len(merged) >= min_rows:
             return merged[-min_rows:]
         if bar_cache is not None:
@@ -1478,8 +1494,8 @@ def score_chart_classifier_bonus(
 ) -> Tuple[float, float, str]:
     if not payload:
         return 0.0, 0.0, "차트점수=off"
-    if len(rows) < 40:
-        return 0.0, 0.0, f"차트점수=warmup({len(rows)}/40)"
+    if len(rows) < CHART_WINDOW_BARS:
+        return 0.0, 0.0, f"차트점수=warmup({len(rows)}/{CHART_WINDOW_BARS})"
     try:
         from user_only_strategy.build_chart_image_dataset import render_chart_png
     except Exception as e:
@@ -1488,7 +1504,7 @@ def score_chart_classifier_bonus(
     model = payload.get("model")
     portable_model = payload.get("portable_model")
     image_size = int(payload.get("image_size", 96))
-    window = rows[-40:]
+    window = rows[-CHART_WINDOW_BARS:]
     chart_rows = [
         {
             "date": _parse_bar_datetime(float(r["date"])).strftime("%Y-%m-%d %H:%M:%S"),
@@ -3334,7 +3350,7 @@ def main() -> None:
                     app_key=args.app_key,
                     app_secret=args.app_secret,
                     symbol=candidate.symbol,
-                    count_hint=raw_count_hint_for_resampled_bars(40, args.bar_minutes),
+                    count_hint=raw_count_hint_for_resampled_bars(CHART_WINDOW_BARS, args.bar_minutes),
                     market_code=args.minute_market_code,
                 )
                 today_rows = resample_bars(today_rows_raw, bar_minutes=args.bar_minutes)
@@ -3347,11 +3363,11 @@ def main() -> None:
                     symbol=candidate.symbol,
                     market_code=args.minute_market_code,
                     bar_minutes=int(args.bar_minutes),
-                    min_rows=40,
+                    min_rows=CHART_WINDOW_BARS,
                     bar_cache=bar_cache,
                 )
-                if len(merged_rows) >= 40:
-                    bar_cache[candidate.symbol] = merged_rows[-40:]
+                if len(merged_rows) >= CHART_WINDOW_BARS:
+                    bar_cache[candidate.symbol] = merged_rows[-CHART_WINDOW_BARS:]
                     updated = True
             except Exception:
                 continue
@@ -3491,7 +3507,7 @@ def main() -> None:
         symbols: set[str] = {c.symbol for c in watch_candidates} | set(manual_watch_symbols)
         for symbol in sorted(symbols):
             rows = bar_cache.get(symbol) or []
-            if not isinstance(rows, list) or len(rows) < 40:
+            if not isinstance(rows, list) or len(rows) < CHART_WINDOW_BARS:
                 continue
             held = positions.get(symbol, 0) > 0
             try:
@@ -4298,13 +4314,13 @@ def main() -> None:
                 symbol=c.symbol,
                 market_code=args.minute_market_code,
                 bar_minutes=int(args.bar_minutes),
-                min_rows=40,
+                min_rows=CHART_WINDOW_BARS,
                 bar_cache=bar_cache,
             )
             # Keep a rolling cache of the latest window to reduce warmup at session open.
             try:
-                if len(rows) >= 40:
-                    bar_cache[c.symbol] = rows[-40:]
+                if len(rows) >= CHART_WINDOW_BARS:
+                    bar_cache[c.symbol] = rows[-CHART_WINDOW_BARS:]
                     if (
                         last_bar_cache_save_at is None
                         or (now - last_bar_cache_save_at).total_seconds() >= 60
